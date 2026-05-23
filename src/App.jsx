@@ -302,7 +302,7 @@ INSTRUÇÕES:
 }
 
 // ════════════════════════════════════════════════════════════════
-//  🔄 FALLBACK — Respostas locais quando API está indisponível
+//  🔄 ATLAS IA — Respostas inteligentes baseadas nos dados reais
 // ════════════════════════════════════════════════════════════════
 function respostaLocal(mensagem, transacoes, perfil) {
   const msg=mensagem.toLowerCase().trim();
@@ -312,65 +312,200 @@ function respostaLocal(mensagem, transacoes, perfil) {
     if(t.tipo!=="despesa") return false;
     try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
   });
+  const recMes=transacoes.filter(t=>{
+    if(t.tipo!=="receita") return false;
+    try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
+  });
 
-  const recCents  = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
-  const despCents = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
-  const saldoCents= recCents - despCents;
-  const despMesCents=somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+  const recCents    = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
+  const despCents   = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
+  const saldoCents  = recCents - despCents;
+  const despMesCents= somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+  const recMesCents = somarCents(recMes.map(t=>t.amountCents||toCents(t.amount)));
 
   const gastoCat=(cat)=>somarCents(despMes.filter(t=>t.categoria===cat).map(t=>t.amountCents||toCents(t.amount)));
   const topCat=CATEGORIAS.map(c=>({nome:c,cents:gastoCat(c)})).sort((a,b)=>b.cents-a.cents).filter(c=>c.cents>0);
   const perfilTipo=perfil?.tipo||"Equilibrado";
 
-  if(/(saldo|quanto.*(tenho|sobrou|resta)|dinheiro)/.test(msg)||msg==="saldo"){
-    return saldoCents>=0
-      ?`💚 Seu saldo atual é **${fmtSaldo(saldoCents)}**. Ótimo — receitas superam despesas! Continue registrando tudo.`
-      :`🔴 Seu saldo está **${fmtSaldo(saldoCents)}**. Hora de revisar gastos urgentemente!`;
+  // Calcular gasto diário médio
+  const diaDoMes=agora.getDate();
+  const gastoDiario=diaDoMes>0?Math.round(despMesCents/diaDoMes):0;
+  const diasNoMes=new Date(anoAtual,mesAtual+1,0).getDate();
+  const diasRestantes=diasNoMes-diaDoMes;
+
+  // ── SAUDAÇÕES ──────────────────────────────────────────────
+  if(/(^(olá|oi|ola|hey|e aí|eai|hello|hi)$|bom dia|boa tarde|boa noite|tudo bem|tudo bom|como vai)/.test(msg)){
+    const hora=agora.getHours();
+    const saudacao=hora<12?"Bom dia":hora<18?"Boa tarde":"Boa noite";
+    return `👋 ${saudacao}! Sou o **Atlas IA**, seu assistente financeiro pessoal.\n\nEstou aqui para te ajudar a entender seus gastos e tomar melhores decisões com o dinheiro. O que quer saber?\n\n💡 Pode me perguntar sobre: saldo, gastos do mês, bar da escola, metas, dicas de economia e seu perfil financeiro.`;
   }
-  if(/(resumo|análise|balanço|como.*estou|situação)/.test(msg)){
+
+  // ── SALDO ──────────────────────────────────────────────────
+  if(/(saldo|quanto.*(tenho|sobrou|resta|tenho disponível)|meu dinheiro|dinheiro disponível)/.test(msg)){
+    if(transacoes.length===0) return `💰 Você ainda não registrou nenhuma transação. Adicione suas receitas e despesas para eu calcular seu saldo!`;
     const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
-    return `📊 **Resumo:**\n• Receitas: ${fmt(recCents)}\n• Despesas: ${fmt(despCents)}\n• Saldo: ${fmtSaldo(saldoCents)}\n• Poupança: ${taxa}%\n\nPerfil: **${perfilTipo}** — ${perfil?.desc||"continue acompanhando!"}`;
+    if(saldoCents>=0)
+      return `💚 Seu saldo atual é **${fmtSaldo(saldoCents)}**.\n\n• Receitas totais: ${fmt(recCents)}\n• Despesas totais: ${fmt(despCents)}\n• Taxa de poupança: ${taxa}%\n\n${taxa>=20?"🏆 Excelente! Você está poupando bem.":taxa>=10?"✅ Bom controle! Tente chegar em 20% de poupança.":"⚠️ Tente guardar pelo menos 20% do que recebe."}`;
+    return `🔴 Seu saldo está **${fmtSaldo(saldoCents)}** (negativo).\n\nVocê gastou ${fmt(Math.abs(saldoCents))} a mais do que recebeu. Evite novos gastos e tente quitar essa diferença o quanto antes!`;
   }
-  if(/(bar|cantina|lanche|salgado|doce|bebida)/.test(msg)){
-    const b=gastoCat("Bar da escola");
-    return b===0?`🧃 Sem gastos no **Bar da escola** este mês.`
-      :`🧃 Você gastou **${fmt(b)}** no bar este mês. ${b>8000?"⚠️ Está alto! Tente ficar abaixo de R$80,00.":"Está controlado!"}`;
+
+  // ── SALDO SAUDÁVEL ─────────────────────────────────────────
+  if(/(saldo.*(saudável|bom|ok|positivo)|financeiramente.*bem|indo bem|estou bem)/.test(msg)){
+    if(saldoCents<0) return `🔴 Não está muito bem não. Seu saldo está **${fmtSaldo(saldoCents)}** — você gastou mais do que recebeu. Hora de agir!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    if(taxa>=20) return `💎 Sim! Seu saldo está **${fmtSaldo(saldoCents)}** e você está poupando **${taxa}%** da sua renda. Isso é excelente para um estudante!`;
+    if(taxa>=5)  return `✅ Razoável! Saldo de **${fmtSaldo(saldoCents)}** com **${taxa}%** de poupança. Você pode melhorar chegando a 20%!`;
+    return `⚠️ Seu saldo é positivo (**${fmtSaldo(saldoCents)}**), mas a margem é pequena. Tente cortar alguns gastos para ter mais segurança.`;
   }
-  if(/(alimenta|comida|almoço|restaurante)/.test(msg)){
-    const g=gastoCat("Alimentação");
-    return g===0?`🍔 Sem gastos com Alimentação este mês.`
-      :`🍔 **Alimentação:** ${fmt(g)} este mês. ${g>30000?"⚠️ Considere trazer marmita!":"✅ Dentro do limite."}`;
+
+  // ── RESUMO / ANÁLISE ───────────────────────────────────────
+  if(/(resumo|análise|analis|balanço|balanco|situação|situacao|como estou|minha situação)/.test(msg)){
+    if(transacoes.length===0) return `📊 Ainda não tenho dados para analisar. Registre suas receitas e despesas primeiro!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    const top=topCat[0];
+    return `📊 **Resumo financeiro:**\n\n• Receitas: ${fmt(recCents)}\n• Despesas: ${fmt(despCents)}\n• Saldo: **${fmtSaldo(saldoCents)}**\n• Poupança: ${taxa}%\n${top?`• Maior gasto: ${top.nome} (${fmt(top.cents)})`:""  }\n\nPerfil: **${perfil?.emoji||""} ${perfilTipo}**\n${perfil?.desc||""}`;
   }
-  if(/(dica|econom|poupar|guardar|economizar)/.test(msg)){
+
+  // ── GASTANDO MUITO ─────────────────────────────────────────
+  if(/(gastando muito|gasto.*alto|gasto.*demais|gasto excessivo|preciso cortar|to gastando)/.test(msg)){
+    if(despMes.length===0) return `📅 Sem despesas registradas este mês — você está ótimo! Continue registrando tudo.`;
+    const taxa=recMesCents>0?Math.round((despMesCents/recMesCents)*100):100;
+    if(taxa>80) return `⚠️ Sim, você está gastando muito! **${taxa}%** da sua receita do mês já foi em despesas.\n\nMaiores gastos:\n${topCat.slice(0,3).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}\n\nFoco: corte os gastos não essenciais primeiro.`;
+    if(taxa>50) return `⚡ Atenção! Você já usou **${taxa}%** da sua receita este mês. Ainda dá pra controlar — evite gastos por impulso nos próximos dias.`;
+    return `✅ Não! Você gastou **${taxa}%** da sua receita este mês, o que é razoável. Continue monitorando!`;
+  }
+
+  // ── CONTROLE DE GASTOS ─────────────────────────────────────
+  if(/(controlar.*gasto|como.*controlar|como.*organizar|organizar.*financ|controle financeiro)/.test(msg)){
+    return `🎯 **Como controlar seus gastos:**\n\n1. **Registre tudo** — até o menor gasto. O AtlasTrack foi feito pra isso!\n2. **Defina um limite** por categoria todo mês\n3. **Revise semanalmente** — veja onde está gastando mais\n4. **Crie metas** — ter um objetivo te motiva a economizar\n5. **Espere 24h** antes de qualquer compra por impulso\n\nO simples ato de registrar já muda o comportamento! 💪`;
+  }
+
+  // ── QUANTO POSSO GASTAR POR DIA ────────────────────────────
+  if(/(quanto.*gastar.*dia|gasto.*diário|gasto diario|por dia|limite.*diário)/.test(msg)){
+    if(saldoCents<=0) return `🔴 Seu saldo está negativo — evite qualquer gasto até equilibrar as contas!`;
+    if(diasRestantes<=0) return `📅 Último dia do mês! Seu saldo disponível é **${fmt(saldoCents)}**.`;
+    const porDia=Math.floor(saldoCents/diasRestantes);
+    return `📅 Com seu saldo de **${fmt(saldoCents)}** e **${diasRestantes} dias** restantes no mês, você pode gastar até **${fmt(porDia)} por dia** sem entrar no negativo.\n\n💡 Mas tente guardar parte disso para o próximo mês!`;
+  }
+
+  // ── ECONOMIZAR / DICAS ─────────────────────────────────────
+  if(/(como.*economizar|dica.*econom|econom|poupar|guardar dinheiro|gastar menos|cortar gasto)/.test(msg)){
     const dicas=[
-      "💡 **Regra 50/30/20:** 50% necessidades, 30% desejos, 20% poupança.",
-      "💡 Espere **48h** antes de qualquer compra por impulso. Você ainda vai querer?",
-      "💡 Registre **todos os gastos**, até o menor. A consciência muda o comportamento!",
-      "💡 Crie uma **meta mensal de poupança** — mesmo R$50,00 faz diferença no hábito.",
-      "💡 Compare preços antes de comprar. Pequenas diferenças acumulam muito ao longo do ano.",
+      `💡 **Regra 50/30/20:** Divida sua renda em 50% necessidades, 30% desejos e 20% poupança. Simples e eficaz!`,
+      `💡 **Espere 48h** antes de qualquer compra por impulso. Se depois de 2 dias você ainda quiser, aí compra.`,
+      `💡 **Registre tudo no AtlasTrack** — até o cafezinho. Quem registra gasta menos, porque fica consciente!`,
+      `💡 **Leve lanche de casa** em vez de comprar no bar da escola todo dia. Pode economizar mais de R$100 por mês!`,
+      `💡 **Defina um limite mensal** para lazer e entretenimento e respeite ele. Diversão com controle!`,
+      `💡 **Crie uma meta financeira** — ter um objetivo concreto (headphone, viagem, etc.) motiva muito mais a economizar.`,
+      `💡 **Evite parcelamentos** — o "cabe no bolso" engana. Pague à vista ou não compre.`,
     ];
     return dicas[Math.floor(Math.random()*dicas.length)];
   }
-  if(/(maior.*gasto|onde.*gast|categoria)/.test(msg)){
-    return topCat.length===0?`📂 Sem despesas registradas este mês.`
-      :`📂 Maior gasto: **${topCat[0].nome}** com **${fmt(topCat[0].cents)}**. ${topCat[0].cents>20000?"Atenção — está pesando no orçamento!":"Ainda aceitável."}`;
+
+  // ── ECONOMIZAR SENDO ESTUDANTE ─────────────────────────────
+  if(/(estudante|sendo jovem|sendo estudante|jovem.*economizar|econom.*jovem)/.test(msg)){
+    return `🎒 **Dicas para estudantes economizarem:**\n\n1. **Lanche de casa** — o bar da escola é conveniente mas caro\n2. **Carona e transporte coletivo** — evite aplicativos de corrida no dia a dia\n3. **Material escolar usado** — livros e materiais de colegas mais velhos\n4. **Meia-entrada** — use sempre que disponível em shows e cinemas\n5. **Trabalhe com o que tem** — pequenos bicos, venda de itens, freelance\n6. **Aproveite o que a escola oferece** — biblioteca, internet, impressão\n\nComeçar cedo a cuidar do dinheiro é o maior presente que você pode se dar! 💎`;
   }
-  if(/(perfil|meu.*tipo|como.*classificado)/.test(msg)){
-    return perfil
-      ?`🧠 Perfil: **${perfil.emoji} ${perfil.tipo}**\n\n${perfil.desc}`
-      :`🧠 Você ainda não fez o questionário de perfil. Vai aparecer na próxima vez que você abrir o app!`;
+
+  // ── COMPRAS IMPULSIVAS ─────────────────────────────────────
+  if(/(impulso|impulsiv|compra.*impulso|evitar.*compra|resistir|tentação)/.test(msg)){
+    return `🛑 **Como evitar compras por impulso:**\n\n• **Regra das 48h** — espere 2 dias antes de comprar qualquer coisa não planejada\n• **Saia sem cartão** — leve só o dinheiro que vai precisar\n• **Pergunte-se:** "Preciso disso ou só quero?"\n• **Pense no custo real** — quantas horas de mesada/trabalho isso representa?\n• **Delete apps de loja** do celular — menos tentação, menos gasto\n• **Tenha uma meta** — lembrar do objetivo te dá força para resistir\n\nO autocontrole financeiro é um músculo — quanto mais você exercita, mais forte fica! 💪`;
   }
-  if(/(mês|mensal|este.*mes|esse.*mes)/.test(msg)){
-    return despMes.length===0?`📅 Sem despesas este mês ainda.`
-      :`📅 **Este mês:** ${fmt(despMesCents)} em ${despMes.length} transações.\n${topCat.slice(0,2).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}`;
+
+  // ── BAR DA ESCOLA ──────────────────────────────────────────
+  if(/(bar|cantina|bar da escola|lanche.*escola|escola.*lanche)/.test(msg)){
+    const b=gastoCat("Bar da escola");
+    const txBar=despMesCents>0?Math.round((b/despMesCents)*100):0;
+    if(b===0) return `🧃 Você não tem gastos registrados no **Bar da escola** este mês. Ótimo controle!`;
+    const status=b>8000?"⚠️ Está alto! Tente ficar abaixo de R$80,00 por mês.":b>4000?"⚡ Moderado. Tente reduzir um pouco.":"✅ Controlado! Bom trabalho.";
+    return `🧃 **Bar da escola este mês:**\n\n• Total gasto: **${fmt(b)}**\n• % das despesas: ${txBar}%\n• Status: ${status}\n\n💡 Levar lanche de casa alguns dias pode economizar bastante no mês!`;
   }
-  if(/(olá|oi|ola|hey|bom dia|boa tarde|tudo bem)/.test(msg)){
-    return `👋 Olá! Sou o **Atlas IA**.\n\nPosso analisar: saldo, gastos do mês, bar da escola, categorias, perfil e dicas. O que quer saber?`;
+
+  // ── GASTAR MENOS NO BAR ────────────────────────────────────
+  if(/(menos.*bar|bar.*menos|reduzir.*bar|cortar.*bar|bar.*caro)/.test(msg)){
+    const b=gastoCat("Bar da escola");
+    return `🧃 ${b>0?`Você gastou **${fmt(b)}** no bar este mês. `:""}**Dicas para gastar menos no bar:**\n\n1. Leve água e um lanche de casa\n2. Defina um limite semanal (ex: R$20)\n3. Evite comprar por impulso quando estiver com fome\n4. Compare: R$5 por dia = R$100 por mês = R$1.200 por ano!\n\nPequenas mudanças geram grandes economias! 💰`;
   }
+
+  // ── CATEGORIA QUE MAIS GASTA ───────────────────────────────
+  if(/(categoria|mais.*gast|onde.*gast|maior.*gasto|gasto.*maior|mais.*caro)/.test(msg)){
+    if(topCat.length===0) return `📂 Sem despesas registradas este mês ainda.`;
+    return `📂 **Suas maiores categorias de gasto este mês:**\n\n${topCat.slice(0,4).map((c,i)=>`${i===0?"🥇":i===1?"🥈":i===2?"🥉":"  4."} ${c.nome}: **${fmt(c.cents)}**`).join("\n")}\n\n${topCat[0].cents>20000?`⚠️ **${topCat[0].nome}** está pesando bastante. Vale a pena revisar esses gastos!`:`✅ Seus gastos estão bem distribuídos.`}`;
+  }
+
+  // ── QUANTO GASTEI NO MÊS ───────────────────────────────────
+  if(/(quanto.*gastei|gasto.*mês|gasto.*mes|este mês|esse mês|mensal|mês atual)/.test(msg)){
+    if(despMes.length===0) return `📅 Nenhuma despesa registrada este mês ainda. Continue registrando tudo!`;
+    return `📅 **Gastos de ${MESES[mesAtual]}:**\n\n• Total: **${fmt(despMesCents)}**\n• Transações: ${despMes.length}\n• Média diária: ${fmt(gastoDiario)}\n${topCat.length>0?`\nMaiores gastos:\n${topCat.slice(0,3).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}`:""}`;
+  }
+
+  // ── QUANTO ECONOMIZEI ──────────────────────────────────────
+  if(/(economi[sz]ei|quanto.*guard|poupança|quanto.*sobrou|sobra)/.test(msg)){
+    if(recCents===0) return `💰 Adicione suas receitas primeiro para eu calcular quanto você economizou!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    if(saldoCents<=0) return `😟 Este mês você não economizou — as despesas superaram as receitas em **${fmt(Math.abs(saldoCents))}**. Tente reduzir os gastos!`;
+    return `💚 Você economizou **${fmt(saldoCents)}** — isso representa **${taxa}%** da sua receita.\n\n${taxa>=20?"🏆 Parabéns! Isso é excelente.":taxa>=10?"✅ Bom resultado! Tente chegar em 20%.":"💪 É um começo! Tente aumentar essa porcentagem."}`;
+  }
+
+  // ── MAIOR GASTO ────────────────────────────────────────────
+  if(/(maior.*gasto|gasto.*maior|gasto.*mais caro|mais caro|maior.*despesa)/.test(msg)){
+    const todas=transacoes.filter(t=>t.tipo==="despesa").sort((a,b)=>(b.amountCents||toCents(b.amount))-(a.amountCents||toCents(a.amount)));
+    if(todas.length===0) return `📊 Nenhuma despesa registrada ainda.`;
+    const maior=todas[0];
+    return `💸 Seu maior gasto foi **${fmt(maior.amountCents||toCents(maior.amount))}** em **${maior.categoria}**${maior.descricao?` (${maior.descricao})`:""}  no dia ${maior.data}.`;
+  }
+
+  // ── GASTO AUMENTOU OU DIMINUIU ─────────────────────────────
+  if(/(aumentou|diminuiu|comparado|mês passado|mes passado|evolução|evolucao|tendência)/.test(msg)){
+    const mesAnt=mesAtual===0?11:mesAtual-1;
+    const anoAnt=mesAtual===0?anoAtual-1:anoAtual;
+    const despAnt=somarCents(transacoes.filter(t=>{
+      if(t.tipo!=="despesa") return false;
+      try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAnt&&d.getFullYear()===anoAnt;}catch{return false;}
+    }).map(t=>t.amountCents||toCents(t.amount)));
+    if(despAnt===0) return `📈 Não tenho dados do mês passado para comparar. Continue registrando e em breve terei!`;
+    const diff=despMesCents-despAnt;
+    const pct=Math.round((Math.abs(diff)/despAnt)*100);
+    if(diff>0) return `📈 Seus gastos **aumentaram ${pct}%** em relação ao mês passado.\n\n• Mês passado: ${fmt(despAnt)}\n• Este mês: ${fmt(despMesCents)}\n• Diferença: +${fmt(diff)}\n\n⚠️ Fique atento para não continuar essa tendência!`;
+    if(diff<0) return `📉 Seus gastos **diminuíram ${pct}%** em relação ao mês passado!\n\n• Mês passado: ${fmt(despAnt)}\n• Este mês: ${fmt(despMesCents)}\n• Economia: ${fmt(Math.abs(diff))}\n\n🎉 Parabéns! Continue assim!`;
+    return `📊 Seus gastos estão **iguais** ao mês passado: ${fmt(despMesCents)}. Tente reduzir!`;
+  }
+
+  // ── PERFIL FINANCEIRO ──────────────────────────────────────
+  if(/(perfil|meu.*tipo|tipo.*financeiro|como.*classificado|sou gastador|sou econômico)/.test(msg)){
+    if(!perfil) return `🧠 Você ainda não fez o questionário de perfil financeiro. Ele aparecerá automaticamente na próxima vez que você abrir o app!`;
+    return `🧠 **Seu perfil financeiro:**\n\n${perfil.emoji} **${perfil.tipo}**\n\n${perfil.desc}\n\n💡 O questionário se repete a cada 30 dias para acompanhar sua evolução!`;
+  }
+
+  // ── O QUE SIGNIFICA CADA PERFIL ────────────────────────────
+  if(/(o que.*significa|significa.*perfil|econômico.*significa|gastador.*significa|equilibrado.*significa)/.test(msg)){
+    return `🧠 **Os 3 perfis financeiros:**\n\n🔥 **Gastador** — Tende a gastar sem planejar. Precisa de mais controle e disciplina.\n\n⚖️ **Equilibrado** — Tem bom controle mas ainda comete excessos às vezes.\n\n💎 **Econômico** — Excelente disciplina financeira. Planeja, poupa e controla bem.\n\nO objetivo é evoluir para **Econômico** com o tempo!`;
+  }
+
+  // ── MELHORAR PERFIL ────────────────────────────────────────
+  if(/(melhorar.*perfil|virar.*econômico|ser.*econômico|mudar.*perfil|como melhorar)/.test(msg)){
+    return `💎 **Como melhorar seu perfil financeiro:**\n\n1. **Registre tudo** — consciência é o primeiro passo\n2. **Defina limites** por categoria todo mês\n3. **Poupe antes de gastar** — separe 20% assim que receber\n4. **Evite parcelamentos** — eles escondem o real valor gasto\n5. **Revise suas metas** semanalmente\n6. **Refaça o questionário** em 30 dias para ver sua evolução\n\nMudança de hábito leva tempo, mas vale a pena! 💪`;
+  }
+
+  // ── METAS ──────────────────────────────────────────────────
+  if(/(meta|objetivo|sonho|quanto falta|perto.*meta|meta.*perto|atingir.*meta)/.test(msg)){
+    if(transacoes.length===0) return `🎯 Crie suas metas na aba **Metas** do app! Ter um objetivo concreto te motiva muito mais a economizar.`;
+    return `🎯 Acesse a aba **Metas** para ver o progresso detalhado de cada objetivo.\n\n💡 Dica: divida o valor que falta pelos dias até o prazo para saber quanto guardar por dia!`;
+  }
+
+  // ── QUANTO GUARDAR POR SEMANA ──────────────────────────────
+  if(/(quanto.*guardar|guardar.*semana|guardar.*dia|poupar.*semana|poupar.*dia)/.test(msg)){
+    if(saldoCents<=0) return `😟 Seu saldo está negativo — primeiro equilibre as contas antes de pensar em poupar!`;
+    const porSemana=Math.floor(saldoCents/4);
+    const porDia2=Math.floor(saldoCents/30);
+    return `💰 Com seu saldo atual de **${fmt(saldoCents)}**, você poderia guardar:\n\n• **${fmt(porDia2)} por dia**\n• **${fmt(porSemana)} por semana**\n\nO ideal é guardar pelo menos 20% da sua renda mensal assim que receber!`;
+  }
+
+  // ── SAUDAÇÃO FINAL / NÃO ENTENDEU ─────────────────────────
   if(topCat.length>0){
-    return `🤔 Não entendi, mas: seu maior gasto este mês é **${topCat[0].nome}** (${fmt(topCat[0].cents)}). Tente perguntar sobre "saldo", "resumo", "dicas" ou "bar da escola".`;
+    return `🤖 Não entendi bem a pergunta, mas posso te ajudar com:\n\n• **Saldo** — quanto você tem disponível\n• **Gastos do mês** — quanto gastou em ${MESES[mesAtual]}\n• **Bar da escola** — seus gastos lá\n• **Dicas** — como economizar mais\n• **Perfil** — seu tipo financeiro\n• **Metas** — progresso dos seus objetivos\n\nSeu maior gasto este mês é **${topCat[0].nome}** (${fmt(topCat[0].cents)}). Quer saber mais sobre isso?`;
   }
-  return `🤔 Tente perguntar sobre: **saldo**, **resumo**, **dicas de economia**, **bar da escola** ou **meu perfil**.`;
+  return `🤖 Olá! Sou o **Atlas IA**. Ainda não tenho seus dados financeiros para analisar.\n\nComece adicionando suas receitas e despesas e depois volte aqui — terei muito mais para te contar! 😊`;
 }
 
 // ════════════════════════════════════════════════════════════════
