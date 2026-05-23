@@ -78,13 +78,16 @@ const DB = {
   transacoes: ()=>DB.get("transacoes")||[],
   metas:      ()=>DB.get("metas")     ||[],
   perfis:     ()=>DB.get("perfis")    ||[],
+  contas:          ()=>DB.get("contas")      ||[],
   salvarUsuarios:   (u)=>DB.set("usuarios",u),
   salvarTransacoes: (t)=>DB.set("transacoes",t),
   salvarMetas:      (m)=>DB.set("metas",m),
   salvarPerfis:     (p)=>DB.set("perfis",p),
-  txDoUsuario:    (uid)=>DB.transacoes().filter(t=>t.userId===uid),
-  metasDoUsuario: (uid)=>DB.metas().filter(m=>m.userId===uid),
-  perfilDoUsuario:(uid)=>DB.perfis().find(p=>p.userId===uid)||null,
+  salvarContas:     (c)=>DB.set("contas",c),
+  txDoUsuario:     (uid)=>DB.transacoes().filter(t=>t.userId===uid),
+  metasDoUsuario:  (uid)=>DB.metas().filter(m=>m.userId===uid),
+  perfilDoUsuario: (uid)=>DB.perfis().find(p=>p.userId===uid)||null,
+  contasDoUsuario: (uid)=>DB.contas().filter(c=>c.userId===uid),
 };
 
 // ════════════════════════════════════════════════════════════════
@@ -115,8 +118,84 @@ function calcularPerfil(respostas){
 }
 
 // ════════════════════════════════════════════════════════════════
-//  🤖 ATLAS IA — Contexto financeiro para o Claude
+//  🔔 MOTOR DE NOTIFICAÇÕES
 // ════════════════════════════════════════════════════════════════
+function gerarNotificacoes(transacoes, metas, contas, saldoCents) {
+  const notifs = [];
+  const hoje   = new Date();
+  const agora  = hoje.getTime();
+
+  // ── 1. Contas a pagar ─────────────────────────────────────────
+  contas.filter(c => !c.paga).forEach(c => {
+    const venc  = new Date(c.vencimento + "T00:00:00");
+    const dias  = Math.ceil((venc - hoje) / 86400000);
+    const valor = fmt(c.valorCents);
+    if (dias < 0) {
+      notifs.push({ id:"conta_"+c.id, tipo:"perigo", icone:"🚨", titulo:"Conta vencida!", desc:`${c.nome} — ${valor} (venceu há ${Math.abs(dias)} dia${Math.abs(dias)>1?"s":""})`, prioridade:1, contaId:c.id });
+    } else if (dias === 0) {
+      notifs.push({ id:"conta_"+c.id, tipo:"perigo", icone:"❗", titulo:"Conta vence HOJE!", desc:`${c.nome} — ${valor}`, prioridade:1, contaId:c.id });
+    } else if (dias <= 3) {
+      notifs.push({ id:"conta_"+c.id, tipo:"alerta", icone:"⚠️", titulo:`Conta em ${dias} dia${dias>1?"s":""}`, desc:`${c.nome} — ${valor}`, prioridade:2, contaId:c.id });
+    } else if (dias <= 7) {
+      notifs.push({ id:"conta_"+c.id, tipo:"info",   icone:"📅", titulo:`Conta em ${dias} dias`, desc:`${c.nome} — ${valor}`, prioridade:3, contaId:c.id });
+    }
+  });
+
+  // ── 2. Saldo negativo ─────────────────────────────────────────
+  if (saldoCents < 0) {
+    notifs.push({ id:"saldo_neg", tipo:"perigo", icone:"🔴", titulo:"Saldo negativo!", desc:`Seu saldo está em ${fmtSaldo(saldoCents)}. Evite novos gastos.`, prioridade:1 });
+  }
+
+  // ── 3. Metas próximas do prazo ────────────────────────────────
+  metas.forEach(m => {
+    if (!m.prazo) return;
+    const venc = new Date(m.prazo + "T00:00:00");
+    const dias = Math.ceil((venc - hoje) / 86400000);
+    const alvoCents = m.valorAlvoCents || toCents(m.valorAlvo);
+    const guardCents = m.valorGuardadoCents || toCents(m.valorGuardado);
+    const pct = alvoCents > 0 ? guardCents / alvoCents : 0;
+    if (dias > 0 && dias <= 7 && pct < 1) {
+      notifs.push({ id:"meta_"+m.id, tipo:"alerta", icone:"🎯", titulo:`Meta expira em ${dias} dia${dias>1?"s":""}`, desc:`${m.nomeMeta}: ${Math.round(pct*100)}% concluída`, prioridade:2 });
+    }
+    if (pct >= 1) {
+      notifs.push({ id:"metaok_"+m.id, tipo:"sucesso", icone:"🏆", titulo:"Meta atingida!", desc:`Parabéns! Você completou "${m.nomeMeta}"`, prioridade:4 });
+    }
+  });
+
+  // ── 4. Gastos altos por categoria (mês atual) ─────────────────
+  const mesAtual = hoje.getMonth(), anoAtual = hoje.getFullYear();
+  const LIMITES = { "Alimentação":30000, "Entretenimento":15000, "Bar da escola":8000, "Compras":20000, "Roupas":15000 };
+  Object.entries(LIMITES).forEach(([cat, limite]) => {
+    const gasto = somarCents(transacoes.filter(t => {
+      if (t.tipo !== "despesa" || t.categoria !== cat) return false;
+      try { const d = new Date(t.data+"T00:00:00"); return d.getMonth()===mesAtual && d.getFullYear()===anoAtual; } catch { return false; }
+    }).map(t => t.amountCents || toCents(t.amount)));
+    if (gasto > limite) {
+      notifs.push({ id:"gasto_"+cat, tipo:"alerta", icone:CAT_ICONES[cat]||"⚠️", titulo:`Gastos altos: ${cat}`, desc:`${fmt(gasto)} este mês (limite sugerido: ${fmt(limite)})`, prioridade:3 });
+    }
+  });
+
+  // ── 5. Lembrete para registrar gastos ─────────────────────────
+  const ultimaTx = transacoes.length > 0
+    ? transacoes.reduce((a, b) => (a.criadoEm||"") > (b.criadoEm||"") ? a : b, transacoes[0])
+    : null;
+  if (ultimaTx) {
+    const diffDias = Math.floor((agora - new Date(ultimaTx.criadoEm).getTime()) / 86400000);
+    if (diffDias >= 5) {
+      notifs.push({ id:"lembrete_tx", tipo:"info", icone:"📝", titulo:"Registre seus gastos!", desc:`Sua última transação foi há ${diffDias} dias. Mantenha o controle!`, prioridade:4 });
+    }
+  } else if (transacoes.length === 0) {
+    notifs.push({ id:"lembrete_tx0", tipo:"info", icone:"📝", titulo:"Adicione sua primeira transação!", desc:"Comece a controlar suas finanças agora.", prioridade:4 });
+  }
+
+  // ordenar por prioridade (1 = mais urgente)
+  return notifs.sort((a, b) => a.prioridade - b.prioridade);
+}
+
+const COR_NOTIF = { perigo:"#ff4455", alerta:"#FFB347", sucesso:"#00E676", info:"#45B7D1" };
+const BG_NOTIF  = { perigo:"#ff445518", alerta:"#FFB34718", sucesso:"#00E67618", info:"#45B7D118" };
+
+
 function construirContextoFinanceiro(transacoes, perfil) {
   const agora    = new Date();
   const mesAtual = agora.getMonth();
@@ -416,6 +495,7 @@ const S={
   toast:   (ok)=>({position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",background:ok?"#00E676":"#ff6b6b",color:"#000",padding:"12px 22px",borderRadius:40,fontWeight:700,fontSize:14,zIndex:999,whiteSpace:"nowrap",boxShadow:"0 8px 32px rgba(0,0,0,0.5)",pointerEvents:"none"}),
   fi:      (e)=>{e.target.style.borderColor="#00E676";},
   fo:      (e)=>{e.target.style.borderColor="#2a2a2a";},
+  notifBadge: {position:"absolute",top:4,right:4,background:"#ff4455",borderRadius:"50%",width:16,height:16,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:900,color:"#fff",pointerEvents:"none"},
 };
 
 // ════════════════════════════════════════════════════════════════
@@ -454,6 +534,16 @@ export default function AtlasTrack(){
   // Dados
   const [transacoes,setTransacoes]=useState([]);
   const [metas,     setMetas]     =useState([]);
+  const [contas,    setContas]    =useState([]);   // contas a pagar
+
+  // Notificações
+  const [notificacoes,   setNotificacoes]   =useState([]);
+  const [abaNotif,       setAbaNotif]       =useState(false);  // drawer aberto?
+  const [popupInicial,   setPopupInicial]   =useState(false);  // popup ao abrir
+
+  // Contas a pagar — form
+  const [formConta, setFormConta]=useState({nome:"",valorStr:"",vencimento:"",recorrente:false,categoria:"Outros"});
+  const [editarConta,setEditarConta]=useState(null);
 
   // Atlas IA
   const [msgIA,  setMsgIA] =useState("");
@@ -466,19 +556,44 @@ export default function AtlasTrack(){
 
   const carregarDados=useCallback((uid)=>{
     try{
-      setTransacoes(DB.txDoUsuario(uid));
-      setMetas(DB.metasDoUsuario(uid));
-      const p=DB.perfilDoUsuario(uid);
-      if(p) setPerfil(p);
+      const txs  = DB.txDoUsuario(uid);
+      const mts  = DB.metasDoUsuario(uid);
+      const cnts = DB.contasDoUsuario(uid);
+      const perf = DB.perfilDoUsuario(uid);
+      setTransacoes(txs);
+      setMetas(mts);
+      setContas(cnts);
+      if(perf) setPerfil(perf);
+      // Calcular saldo para notificações
+      const rec  = somarCents(txs.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
+      const desp = somarCents(txs.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
+      setNotificacoes(gerarNotificacoes(txs, mts, cnts, rec-desp));
     }catch{}
   },[]);
 
   useEffect(()=>{
     if(usuario?.id){
       carregarDados(usuario.id);
-      if(!DB.perfilDoUsuario(usuario.id)) setMostrarQ(true);
+      const perf=DB.perfilDoUsuario(usuario.id);
+      if(!perf){
+        setMostrarQ(true);
+      } else {
+        // Mostrar questionário a cada 30 dias
+        const ultima=new Date(perf.respondidoEm||0);
+        const diasPassados=Math.floor((Date.now()-ultima.getTime())/86400000);
+        if(diasPassados>=30) setMostrarQ(true);
+      }
     }
   },[usuario,carregarDados]);
+
+  // Popup de notificações urgentes ao abrir o app
+  useEffect(()=>{
+    if(notificacoes.some(n=>n.tipo==="perigo") && !abaNotif){
+      const timer=setTimeout(()=>setPopupInicial(true),800);
+      return()=>clearTimeout(timer);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[notificacoes.length]);
 
   useEffect(()=>{
     if(chatRef.current) chatRef.current.scrollTop=chatRef.current.scrollHeight;
@@ -498,7 +613,7 @@ export default function AtlasTrack(){
       const senhaCript=await hashSenha(senha);
       const novo={id:DB.uid(),nome,email,senha:senhaCript,criadoEm:new Date().toISOString()};
       usuarios.push(novo); DB.salvarUsuarios(usuarios);
-      popularDemo(novo.id);
+
       const t=criarJWT({id:novo.id,nome,email});
       localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
     }catch{setErroAuth("Erro ao criar conta.");}finally{setCarregando(false);}
@@ -520,7 +635,8 @@ export default function AtlasTrack(){
 
   const sair=()=>{
     localStorage.removeItem("atv3_token");
-    setUsuario(null); setTransacoes([]); setMetas([]); setPerfil(null);
+    setUsuario(null); setTransacoes([]); setMetas([]); setContas([]); setPerfil(null);
+    setNotificacoes([]); setAbaNotif(false); setPopupInicial(false);
     setFormAuth({nome:"",email:"",senha:""}); setTelAuth("login"); setAba("painel");
     setChatIA([]); setMostrarQ(false); setEtapaQ(0); setRespQ([]);
   };
@@ -586,7 +702,55 @@ export default function AtlasTrack(){
     mostrarAviso("Meta removida");
   };
 
-  // ── ATLAS IA ─────────────────────────────────────────────────
+  // ── CONTAS A PAGAR ────────────────────────────────────────────
+  const salvarConta=()=>{
+    const nome=san(formConta.nome);
+    const valorCents=toCents(formConta.valorStr);
+    if(!nome){mostrarAviso("Nome da conta obrigatório",false);return;}
+    if(!valorCents||valorCents<=0){mostrarAviso("Valor inválido",false);return;}
+    if(!formConta.vencimento){mostrarAviso("Data de vencimento obrigatória",false);return;}
+    const cs=DB.contas();
+    if(editarConta){
+      const idx=cs.findIndex(c=>c.id===editarConta.id&&c.userId===usuario.id);
+      if(idx>=0) cs[idx]={...cs[idx],nome,valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria};
+    }else{
+      cs.push({id:DB.uid(),userId:usuario.id,nome,valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria,paga:false,criadoEm:new Date().toISOString()});
+    }
+    DB.salvarContas(cs); carregarDados(usuario.id);
+    const era=!!editarConta;
+    setFormConta({nome:"",valorStr:"",vencimento:"",recorrente:false,categoria:"Outros"});
+    setEditarConta(null);
+    mostrarAviso(era?"Conta atualizada! ✓":"Conta cadastrada! ✓");
+    setAba("contas");
+  };
+
+  const marcarContaPaga=(id)=>{
+    const cs=DB.contas();
+    const idx=cs.findIndex(c=>c.id===id&&c.userId===usuario.id);
+    if(idx<0) return;
+    if(cs[idx].recorrente){
+      // Recorrente: avança vencimento 1 mês e mantém como não paga
+      const d=new Date(cs[idx].vencimento+"T00:00:00");
+      d.setMonth(d.getMonth()+1);
+      cs[idx]={...cs[idx],vencimento:d.toISOString().slice(0,10)};
+      mostrarAviso("Pago! Próximo vencimento atualizado 📅");
+    }else{
+      cs[idx]={...cs[idx],paga:true,pagaEm:new Date().toISOString()};
+      mostrarAviso("Conta marcada como paga! ✓");
+    }
+    DB.salvarContas(cs); carregarDados(usuario.id);
+  };
+
+  const excluirConta=(id)=>{
+    const c=DB.contas().find(x=>x.id===id);
+    if(!c||c.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    DB.salvarContas(DB.contas().filter(x=>x.id!==id)); carregarDados(usuario.id);
+    mostrarAviso("Conta removida");
+  };
+
+  const dispensarNotif=(notifId)=>{
+    setNotificacoes(prev=>prev.filter(n=>n.id!==notifId));
+  };
   const enviarMsgIA=async()=>{
     const texto=san(msgIA);
     if(!texto||digIA) return;
@@ -720,7 +884,19 @@ export default function AtlasTrack(){
           <p style={{color:"#555",fontSize:13,margin:0}}>Olá,</p>
           <h2 style={{margin:"2px 0 0",fontSize:22,fontWeight:800}}>{primeiroNome(usuario.nome)} 👋</h2>
         </div>
-        <button onClick={sair} style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,padding:"8px 14px",color:"#555",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Sair</button>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {/* Sino de notificações */}
+          <div style={{position:"relative"}}>
+            <button onClick={()=>setAbaNotif(true)}
+              style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,cursor:"pointer",position:"relative"}}>
+              🔔
+            </button>
+            {notificacoes.length>0&&(
+              <div style={S.notifBadge}>{notificacoes.length>9?"9+":notificacoes.length}</div>
+            )}
+          </div>
+          <button onClick={sair} style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,padding:"8px 14px",color:"#555",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Sair</button>
+        </div>
       </div>
       <div style={{padding:"0 20px"}}>
         <div style={{...S.dest,background:saldoCents<0?"linear-gradient(135deg,#ff4455,#cc2233)":"linear-gradient(135deg,#00E676,#00C853)"}}>
@@ -828,6 +1004,7 @@ export default function AtlasTrack(){
             )}
           </div>
 
+          {formTx.tipo==="despesa"&&(
           <div>
             <label style={S.rot}>Categoria</label>
             <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
@@ -839,6 +1016,7 @@ export default function AtlasTrack(){
               ))}
             </div>
           </div>
+          )}
 
           {isBar&&(
             <div style={{...S.card,padding:16,background:"#FF8C4210",border:"1.5px solid #FF8C4230"}}>
@@ -855,7 +1033,7 @@ export default function AtlasTrack(){
 
           <div>
             <label style={S.rot}>Descrição {isOutros&&<span style={{color:"#ff6666"}}>*obrigatório</span>}</label>
-            <input style={S.inp} placeholder={isOutros?"Descreva este gasto...":"Para que foi esse gasto? (opcional)"} value={formTx.descricao}
+            <input style={S.inp} placeholder={formTx.tipo==="receita"?"Ex: Mesada, salário, presente...":isOutros?"Descreva este gasto...":"Para que foi esse gasto? (opcional)"} value={formTx.descricao}
               onChange={e=>setFormTx({...formTx,descricao:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
           </div>
           <div>
@@ -1187,6 +1365,268 @@ export default function AtlasTrack(){
   );
 
   // ══════════════════════════════════════════════════════════════
+  //  CONTAS A PAGAR
+  // ══════════════════════════════════════════════════════════════
+  const renderContas=()=>{
+    const isForm=aba==="nova-conta";
+    const contasPend=contas.filter(c=>!c.paga).sort((a,b)=>a.vencimento.localeCompare(b.vencimento));
+    const contasPagas=contas.filter(c=>c.paga).sort((a,b)=>(b.pagaEm||"").localeCompare(a.pagaEm||""));
+
+    if(isForm) return(
+      <div style={S.tela}>
+        <div style={S.cab}>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>{editarConta?"Editar Conta":"Nova Conta"}</h2>
+          <button onClick={()=>{setAba("contas");setEditarConta(null);setFormConta({nome:"",valorStr:"",vencimento:"",recorrente:false,categoria:"Outros"});}}
+            style={{background:"none",border:"none",color:"#555",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Cancelar</button>
+        </div>
+        <div style={{padding:"0 20px",display:"flex",flexDirection:"column",gap:14}}>
+          <div>
+            <label style={S.rot}>Nome da Conta</label>
+            <input style={S.inp} placeholder="Ex: Internet, Aluguel, Mensalidade..." value={formConta.nome}
+              onChange={e=>setFormConta({...formConta,nome:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <div>
+            <label style={S.rot}>Valor (R$)</label>
+            <input style={S.inp} type="number" min="0" step="0.01" placeholder="0,00" value={formConta.valorStr}
+              onChange={e=>setFormConta({...formConta,valorStr:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+            {formConta.valorStr&&toCents(formConta.valorStr)>0&&(
+              <p style={{color:"#00E676",fontSize:12,margin:"4px 0 0",fontWeight:700}}>= {fmt(toCents(formConta.valorStr))}</p>
+            )}
+          </div>
+          <div>
+            <label style={S.rot}>Vencimento</label>
+            <input style={S.inp} type="date" value={formConta.vencimento}
+              onChange={e=>setFormConta({...formConta,vencimento:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <div>
+            <label style={S.rot}>Categoria</label>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {["Moradia","Educação","Saúde","Transporte","Assinaturas","Outros"].map(c=>(
+                <button key={c} onClick={()=>setFormConta({...formConta,categoria:c})} style={S.chip(formConta.categoria===c)}>{c}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12,background:"#1a1a1a",borderRadius:14,padding:"14px 16px"}}>
+            <div onClick={()=>setFormConta({...formConta,recorrente:!formConta.recorrente})}
+              style={{width:44,height:24,borderRadius:12,background:formConta.recorrente?"#00E676":"#2a2a2a",position:"relative",cursor:"pointer",transition:"background 0.2s",flexShrink:0}}>
+              <div style={{position:"absolute",top:2,left:formConta.recorrente?22:2,width:20,height:20,borderRadius:"50%",background:"#fff",transition:"left 0.2s"}}/>
+            </div>
+            <div>
+              <p style={{margin:0,fontSize:14,fontWeight:600,color:formConta.recorrente?"#00E676":"#fff"}}>Conta recorrente (mensal)</p>
+              <p style={{margin:"2px 0 0",fontSize:11,color:"#555"}}>Ao marcar como paga, avança automaticamente pro próximo mês</p>
+            </div>
+          </div>
+          <button style={S.btn} onClick={salvarConta}>{editarConta?"Atualizar Conta":"Cadastrar Conta"}</button>
+        </div>
+      </div>
+    );
+
+    // Lista de contas
+    return(
+      <div style={S.tela}>
+        <div style={S.cab}>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Contas a Pagar</h2>
+          <button onClick={()=>setAba("nova-conta")} style={S.btnSm}>+ Nova</button>
+        </div>
+        <div style={{padding:"0 20px"}}>
+          {/* Resumo */}
+          {contasPend.length>0&&(()=>{
+            const totalPend=somarCents(contasPend.map(c=>c.valorCents));
+            const urgentes=contasPend.filter(c=>{
+              const d=Math.ceil((new Date(c.vencimento+"T00:00:00")-new Date())/86400000);
+              return d<=3;
+            });
+            return(
+              <div style={{...S.card,border:`1.5px solid ${urgentes.length>0?"#ff445533":"#2a2a2a"}`,marginBottom:16}}>
+                <div style={S.row}>
+                  <div>
+                    <p style={{margin:0,fontSize:11,color:"#555",fontWeight:700,letterSpacing:0.5,textTransform:"uppercase"}}>Total pendente</p>
+                    <p style={{margin:"4px 0 0",fontSize:22,fontWeight:900,color:urgentes.length>0?"#ff6666":"#fff"}}>{fmt(totalPend)}</p>
+                  </div>
+                  {urgentes.length>0&&(
+                    <div style={{background:"#ff445520",borderRadius:12,padding:"8px 12px",textAlign:"center"}}>
+                      <p style={{margin:0,fontSize:18,fontWeight:900,color:"#ff6666"}}>{urgentes.length}</p>
+                      <p style={{margin:0,fontSize:10,color:"#ff6666",fontWeight:700}}>urgente{urgentes.length>1?"s":""}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Contas pendentes */}
+          {contasPend.length===0&&contasPagas.length===0&&(
+            <div style={{...S.card,textAlign:"center",padding:"40px 20px"}}>
+              <div style={{fontSize:48,marginBottom:12}}>🧾</div>
+              <p style={{color:"#555",margin:"0 0 16px",fontSize:14}}>Cadastre suas contas e receba alertas antes do vencimento!</p>
+              <button onClick={()=>setAba("nova-conta")} style={S.btn}>Cadastrar Conta</button>
+            </div>
+          )}
+
+          {contasPend.length>0&&(
+            <>
+              <p style={{...S.rot,marginBottom:10}}>Pendentes ({contasPend.length})</p>
+              {contasPend.map(c=>{
+                const venc=new Date(c.vencimento+"T00:00:00");
+                const dias=Math.ceil((venc-new Date())/86400000);
+                const urgente=dias<=3;
+                const vencida=dias<0;
+                const corBorda=vencida?"#ff4455":urgente?"#FFB347":"#2a2a2a";
+                const corDias=vencida?"#ff6666":urgente?"#FFB347":"#555";
+                return(
+                  <div key={c.id} style={{...S.card,border:`1.5px solid ${corBorda}`,marginBottom:12}}>
+                    <div style={S.row}>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                          <span style={{fontSize:15}}>{vencida?"🚨":urgente?"⚠️":"📅"}</span>
+                          <p style={{margin:0,fontWeight:800,fontSize:16}}>{c.nome}</p>
+                          {c.recorrente&&<span style={{background:"#00E67622",color:"#00E676",borderRadius:6,padding:"2px 8px",fontSize:10,fontWeight:700}}>MENSAL</span>}
+                        </div>
+                        <p style={{margin:0,fontSize:20,fontWeight:900,color:"#fff"}}>{fmt(c.valorCents)}</p>
+                        <p style={{margin:"4px 0 0",fontSize:12,color:corDias,fontWeight:600}}>
+                          {vencida?`Vencida há ${Math.abs(dias)} dia${Math.abs(dias)>1?"s":""}`:dias===0?"Vence HOJE!":dias===1?"Vence amanhã":`Vence em ${dias} dias`} — {c.vencimento}
+                        </p>
+                        <p style={{margin:"2px 0 0",fontSize:11,color:"#444"}}>{c.categoria}</p>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,marginTop:12}}>
+                      <button onClick={()=>marcarContaPaga(c.id)}
+                        style={{flex:2,background:"#00E676",border:"none",borderRadius:10,padding:"10px",color:"#000",fontWeight:800,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
+                        ✓ Marcar como Paga
+                      </button>
+                      <button onClick={()=>{setEditarConta(c);setFormConta({nome:c.nome,valorStr:fmtInput(c.valorCents),vencimento:c.vencimento,recorrente:c.recorrente,categoria:c.categoria});setAba("nova-conta");}}
+                        style={{...S.btnG,flex:1,fontSize:12}}>Editar</button>
+                      <button onClick={()=>excluirConta(c.id)}
+                        style={{background:"#ff445515",border:"1.5px solid #ff444530",borderRadius:10,padding:"8px",color:"#ff6666",fontSize:16,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          {/* Contas pagas */}
+          {contasPagas.length>0&&(
+            <>
+              <p style={{...S.rot,marginTop:8,marginBottom:10}}>Pagas recentemente ({contasPagas.length})</p>
+              {contasPagas.slice(0,3).map(c=>(
+                <div key={c.id} style={{...S.card,opacity:0.55,marginBottom:8}}>
+                  <div style={S.row}>
+                    <div>
+                      <p style={{margin:0,fontWeight:700,fontSize:14,textDecoration:"line-through",color:"#666"}}>{c.nome}</p>
+                      <p style={{margin:"2px 0 0",fontSize:12,color:"#444"}}>{fmt(c.valorCents)} · {c.vencimento}</p>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{color:"#00E676",fontWeight:700,fontSize:12}}>✓ Pago</span>
+                      <button onClick={()=>excluirConta(c.id)} style={{background:"none",border:"none",color:"#333",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>✕</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  //  DRAWER DE NOTIFICAÇÕES
+  // ══════════════════════════════════════════════════════════════
+  const renderNotificacoes=()=>(
+    <>
+      {/* Overlay */}
+      <div onClick={()=>setAbaNotif(false)}
+        style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:200,backdropFilter:"blur(2px)"}}/>
+      {/* Drawer */}
+      <div style={{position:"fixed",top:0,right:0,width:"100%",maxWidth:430,height:"100vh",background:"#0e0e0e",zIndex:201,display:"flex",flexDirection:"column",overflowY:"auto"}}>
+        <div style={{padding:"52px 20px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #1e1e1e"}}>
+          <div>
+            <h2 style={{margin:0,fontSize:20,fontWeight:800}}>Notificações</h2>
+            <p style={{margin:"2px 0 0",fontSize:12,color:"#555"}}>{notificacoes.length} alerta{notificacoes.length!==1?"s":""}</p>
+          </div>
+          <button onClick={()=>setAbaNotif(false)}
+            style={{background:"#1a1a1a",border:"none",borderRadius:12,width:36,height:36,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,cursor:"pointer",color:"#fff"}}>✕</button>
+        </div>
+
+        <div style={{flex:1,padding:"16px 20px",display:"flex",flexDirection:"column",gap:10}}>
+          {notificacoes.length===0&&(
+            <div style={{textAlign:"center",padding:"60px 0"}}>
+              <div style={{fontSize:52,marginBottom:12}}>✅</div>
+              <p style={{color:"#555",fontSize:15,fontWeight:600}}>Tudo em ordem!</p>
+              <p style={{color:"#333",fontSize:13,marginTop:6}}>Nenhuma notificação no momento.</p>
+            </div>
+          )}
+          {notificacoes.map(n=>(
+            <div key={n.id} style={{background:BG_NOTIF[n.tipo]||"#1a1a1a",border:`1px solid ${COR_NOTIF[n.tipo]}33`,borderLeft:`3px solid ${COR_NOTIF[n.tipo]}`,borderRadius:14,padding:"14px 16px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <div style={{display:"flex",gap:10,flex:1}}>
+                  <span style={{fontSize:20,flexShrink:0}}>{n.icone}</span>
+                  <div>
+                    <p style={{margin:0,fontWeight:700,fontSize:14,color:COR_NOTIF[n.tipo]}}>{n.titulo}</p>
+                    <p style={{margin:"4px 0 0",fontSize:12,color:"#aaa",lineHeight:1.5}}>{n.desc}</p>
+                  </div>
+                </div>
+                <button onClick={()=>dispensarNotif(n.id)}
+                  style={{background:"none",border:"none",color:"#333",cursor:"pointer",fontSize:16,flexShrink:0,padding:"0 0 0 4px"}}>✕</button>
+              </div>
+              {/* Ação rápida para contas */}
+              {n.contaId&&(
+                <button onClick={()=>{marcarContaPaga(n.contaId);dispensarNotif(n.id);}}
+                  style={{marginTop:10,background:COR_NOTIF[n.tipo],border:"none",borderRadius:8,padding:"8px 14px",color:"#000",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>
+                  ✓ Marcar como Paga
+                </button>
+              )}
+            </div>
+          ))}
+
+          {/* Atalho para cadastrar contas */}
+          <div style={{...S.card,border:"1px dashed #2a2a2a",textAlign:"center",marginTop:8}}>
+            <p style={{color:"#555",fontSize:13,margin:"0 0 10px"}}>Cadastre contas para receber alertas de vencimento</p>
+            <button onClick={()=>{setAbaNotif(false);setAba("contas");}}
+              style={{...S.btnSm,width:"100%"}}>+ Cadastrar Conta a Pagar</button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  POPUP DE URGÊNCIA (ao abrir o app)
+  // ══════════════════════════════════════════════════════════════
+  const renderPopupUrgente=()=>{
+    const urgentes=notificacoes.filter(n=>n.tipo==="perigo");
+    if(!urgentes.length) return null;
+    return(
+      <>
+        <div onClick={()=>setPopupInicial(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",zIndex:300,backdropFilter:"blur(4px)"}}/>
+        <div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",background:"#1a1a1a",borderRadius:24,padding:"28px 24px",width:"calc(100% - 48px)",maxWidth:380,zIndex:301,border:"1px solid #ff445544"}}>
+          <div style={{textAlign:"center",marginBottom:20}}>
+            <div style={{fontSize:44,marginBottom:8}}>🚨</div>
+            <h2 style={{margin:0,fontSize:18,fontWeight:800,color:"#ff6666"}}>Atenção necessária!</h2>
+            <p style={{margin:"6px 0 0",fontSize:13,color:"#666"}}>{urgentes.length} alerta{urgentes.length>1?"s":"" } urgente{urgentes.length>1?"s":""}</p>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
+            {urgentes.slice(0,3).map(n=>(
+              <div key={n.id} style={{background:"#ff445515",borderRadius:12,padding:"12px 14px",borderLeft:"3px solid #ff4455"}}>
+                <p style={{margin:0,fontWeight:700,fontSize:13,color:"#ff6666"}}>{n.icone} {n.titulo}</p>
+                <p style={{margin:"3px 0 0",fontSize:12,color:"#aaa"}}>{n.desc}</p>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{setPopupInicial(false);setAbaNotif(true);}}
+              style={{...S.btn,flex:2,fontSize:14,padding:"13px"}}>Ver Detalhes</button>
+            <button onClick={()=>setPopupInicial(false)}
+              style={{...S.btnG,flex:1,fontSize:13}}>Fechar</button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
   //  NAVEGAÇÃO
   // ══════════════════════════════════════════════════════════════
   const NAV=[
@@ -1195,26 +1635,41 @@ export default function AtlasTrack(){
     {id:"adicionar",    icone:"⊕",  rot:"Adicionar"},
     {id:"estatisticas", icone:"◈",  rot:"Gráficos"},
     {id:"metas",        icone:"◎",  rot:"Metas"},
+    {id:"contas",       icone:"🧾", rot:"Contas"},
     {id:"atlas-ia",     icone:"🤖", rot:"Atlas IA"},
   ];
+
+  const contasUrgentes=notificacoes.filter(n=>n.tipo==="perigo").length;
 
   return(
     <div style={S.app}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
       {aviso&&<div style={S.toast(aviso.ok)}>{aviso.msg}</div>}
+
+      {/* Popup de urgência */}
+      {popupInicial&&renderPopupUrgente()}
+
+      {/* Drawer de notificações */}
+      {abaNotif&&renderNotificacoes()}
+
       <div style={{overflowY:"auto",height:"100vh"}}>
         {aba==="painel"       &&renderPainel()}
         {aba==="adicionar"    &&renderAdicionar()}
         {aba==="historico"    &&renderHistorico()}
         {aba==="estatisticas" &&renderEstatisticas()}
         {(aba==="metas"||aba==="nova-meta")&&renderMetas()}
+        {(aba==="contas"||aba==="nova-conta")&&renderContas()}
         {aba==="atlas-ia"     &&renderAtlasIA()}
       </div>
       <nav style={S.nav}>
         {NAV.map(n=>(
           <button key={n.id} onClick={()=>setAba(n.id)}
-            style={S.navB(aba===n.id||(aba==="nova-meta"&&n.id==="metas"))}>
-            <span style={{fontSize:n.id==="adicionar"?24:n.id==="atlas-ia"?15:18,lineHeight:1}}>{n.icone}</span>
+            style={{...S.navB(aba===n.id||(aba==="nova-meta"&&n.id==="metas")||(aba==="nova-conta"&&n.id==="contas")),position:"relative"}}>
+            <span style={{fontSize:n.id==="adicionar"?24:n.id==="atlas-ia"||n.id==="contas"?15:18,lineHeight:1}}>{n.icone}</span>
+            {/* Badge na aba contas */}
+            {n.id==="contas"&&contasUrgentes>0&&(
+              <div style={{...S.notifBadge,top:2,right:6}}>{contasUrgentes>9?"9+":contasUrgentes}</div>
+            )}
             <span style={{fontSize:9,fontWeight:700,letterSpacing:0.2}}>{n.rot}</span>
           </button>
         ))}
