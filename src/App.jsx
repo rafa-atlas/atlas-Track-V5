@@ -427,8 +427,16 @@ function respostaLocal(mensagem, transacoes, perfil) {
     return `🧃 ${b>0?`Você gastou **${fmt(b)}** no bar este mês. `:""}**Dicas para gastar menos no bar:**\n\n1. Leve água e um lanche de casa\n2. Defina um limite semanal (ex: R$20)\n3. Evite comprar por impulso quando estiver com fome\n4. Compare: R$5 por dia = R$100 por mês = R$1.200 por ano!\n\nPequenas mudanças geram grandes economias! 💰`;
   }
 
+  // ── MAIOR GASTO ────────────────────────────────────────────
+  if(/(maior.*gasto|gasto.*maior|gasto.*mais caro|mais caro|maior.*despesa)/.test(msg)){
+    const todas=transacoes.filter(t=>t.tipo==="despesa").sort((a,b)=>(b.amountCents||toCents(b.amount))-(a.amountCents||toCents(a.amount)));
+    if(todas.length===0) return `📊 Nenhuma despesa registrada ainda.`;
+    const maior=todas[0];
+    return `💸 Seu maior gasto foi **${fmt(maior.amountCents||toCents(maior.amount))}** em **${maior.categoria}**${maior.descricao?` (${maior.descricao})`:""}  no dia ${maior.data}.`;
+  }
+
   // ── CATEGORIA QUE MAIS GASTA ───────────────────────────────
-  if(/(categoria|mais.*gast|onde.*gast|maior.*gasto|gasto.*maior|mais.*caro)/.test(msg)){
+  if(/(categoria|mais.*gast|onde.*gast|mais.*caro)/.test(msg)){
     if(topCat.length===0) return `📂 Sem despesas registradas este mês ainda.`;
     return `📂 **Suas maiores categorias de gasto este mês:**\n\n${topCat.slice(0,4).map((c,i)=>`${i===0?"🥇":i===1?"🥈":i===2?"🥉":"  4."} ${c.nome}: **${fmt(c.cents)}**`).join("\n")}\n\n${topCat[0].cents>20000?`⚠️ **${topCat[0].nome}** está pesando bastante. Vale a pena revisar esses gastos!`:`✅ Seus gastos estão bem distribuídos.`}`;
   }
@@ -447,13 +455,7 @@ function respostaLocal(mensagem, transacoes, perfil) {
     return `💚 Você economizou **${fmt(saldoCents)}** — isso representa **${taxa}%** da sua receita.\n\n${taxa>=20?"🏆 Parabéns! Isso é excelente.":taxa>=10?"✅ Bom resultado! Tente chegar em 20%.":"💪 É um começo! Tente aumentar essa porcentagem."}`;
   }
 
-  // ── MAIOR GASTO ────────────────────────────────────────────
-  if(/(maior.*gasto|gasto.*maior|gasto.*mais caro|mais caro|maior.*despesa)/.test(msg)){
-    const todas=transacoes.filter(t=>t.tipo==="despesa").sort((a,b)=>(b.amountCents||toCents(b.amount))-(a.amountCents||toCents(a.amount)));
-    if(todas.length===0) return `📊 Nenhuma despesa registrada ainda.`;
-    const maior=todas[0];
-    return `💸 Seu maior gasto foi **${fmt(maior.amountCents||toCents(maior.amount))}** em **${maior.categoria}**${maior.descricao?` (${maior.descricao})`:""}  no dia ${maior.data}.`;
-  }
+
 
   // ── GASTO AUMENTOU OU DIMINUIU ─────────────────────────────
   if(/(aumentou|diminuiu|comparado|mês passado|mes passado|evolução|evolucao|tendência)/.test(msg)){
