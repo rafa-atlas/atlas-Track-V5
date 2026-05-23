@@ -1,0 +1,1224 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+// ════════════════════════════════════════════════════════════════
+//  💰 DINHEIRO — Armazenado em centavos (inteiros) para precisão
+//  Todas as operações internas usam centavos.
+//  Apenas na exibição convertemos para reais.
+// ════════════════════════════════════════════════════════════════
+const toCents   = (reais) => Math.round(Number(reais) * 100);          // R$ → centavos
+const toReais   = (cents) => Math.round(Number(cents) || 0) / 100;     // centavos → R$
+const fmt       = (cents) => {                                           // centavos → "R$ 1.234,56" (sempre positivo — para valores individuais)
+  const v = Math.abs(Math.round(Number(cents) || 0));
+  const s = (v / 100).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return "R$ " + s;
+};
+const fmtSaldo  = (cents) => {                                           // centavos → "-R$ 1.234,56" (preserva sinal — para saldo)
+  const n = Math.round(Number(cents) || 0);
+  const v = Math.abs(n);
+  const s = (v / 100).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return (n < 0 ? "-" : "") + "R$ " + s;
+};
+const fmtC = (cents) => {                                                // centavos → "R$1,2k"
+  const v = Math.abs(Math.round(Number(cents) || 0)) / 100;
+  return v >= 1000 ? "R$" + (v / 1000).toFixed(1) + "k" : "R$" + v.toFixed(2).replace(".",",");
+};
+const fmtInput = (cents) => (Math.round(Number(cents)||0)/100).toFixed(2); // para inputs
+
+// Soma segura em centavos — evita ponto flutuante
+const somarCents = (arr) => arr.reduce((s, v) => s + Math.round(Number(v) || 0), 0);
+
+// ════════════════════════════════════════════════════════════════
+//  🔒 SEGURANÇA
+// ════════════════════════════════════════════════════════════════
+const encode  = (s) => new TextEncoder().encode(s);
+const buf2hex = (b) => Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2,"0")).join("");
+const hex2buf = (h) => new Uint8Array((h.match(/.{2}/g)||[]).map(x => parseInt(x,16)));
+const san     = (s) => String(s||"").replace(/[<>"'`]/g,"").trim().slice(0,500);
+const validarEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(e||""));
+
+async function hashSenha(senha) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const km   = await crypto.subtle.importKey("raw", encode(senha), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name:"PBKDF2", salt, iterations:100000, hash:"SHA-256" }, km, 256);
+  return buf2hex(salt)+":"+buf2hex(bits);
+}
+async function verificarSenha(senha, hash) {
+  try {
+    if (!hash?.includes(":")) return false;
+    const [sH,hH] = hash.split(":");
+    const km   = await crypto.subtle.importKey("raw", encode(senha), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name:"PBKDF2", salt:hex2buf(sH), iterations:100000, hash:"SHA-256" }, km, 256);
+    return buf2hex(bits)===hH;
+  } catch { return false; }
+}
+function criarJWT(p) {
+  const h=btoa(JSON.stringify({alg:"HS256",typ:"JWT"}));
+  const b=btoa(JSON.stringify({...p,iat:Date.now(),exp:Date.now()+7*24*60*60*1000}));
+  return h+"."+b+"."+btoa(h+"."+b+".atlas_v3");
+}
+function lerJWT(t) {
+  try {
+    if (!t||typeof t!=="string") return null;
+    const p=t.split(".");
+    if (p.length<2) return null;
+    const pay=JSON.parse(atob(p[1]));
+    return pay?.exp>Date.now() ? pay : null;
+  } catch { return null; }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  💾 BANCO DE DADOS
+// ════════════════════════════════════════════════════════════════
+const DB = {
+  get:(k)   =>{ try{return JSON.parse(localStorage.getItem("atv3_"+k)||"null");}catch{return null;} },
+  set:(k,v) =>{ try{localStorage.setItem("atv3_"+k,JSON.stringify(v));}catch{} },
+  del:(k)   =>{ try{localStorage.removeItem("atv3_"+k);}catch{} },
+  uid:()    =>"_"+Math.random().toString(36).slice(2)+Date.now(),
+  usuarios:   ()=>DB.get("usuarios")  ||[],
+  transacoes: ()=>DB.get("transacoes")||[],
+  metas:      ()=>DB.get("metas")     ||[],
+  perfis:     ()=>DB.get("perfis")    ||[],
+  salvarUsuarios:   (u)=>DB.set("usuarios",u),
+  salvarTransacoes: (t)=>DB.set("transacoes",t),
+  salvarMetas:      (m)=>DB.set("metas",m),
+  salvarPerfis:     (p)=>DB.set("perfis",p),
+  txDoUsuario:    (uid)=>DB.transacoes().filter(t=>t.userId===uid),
+  metasDoUsuario: (uid)=>DB.metas().filter(m=>m.userId===uid),
+  perfilDoUsuario:(uid)=>DB.perfis().find(p=>p.userId===uid)||null,
+};
+
+// ════════════════════════════════════════════════════════════════
+//  🏷️ CATEGORIAS
+// ════════════════════════════════════════════════════════════════
+const CATEGORIAS=["Alimentação","Transporte","Entretenimento","Roupas","Material Escolar","Compras","Saúde","Presentes","Tecnologia","Bar da escola","Outros"];
+const CAT_ICONES={"Alimentação":"🍔","Transporte":"🚌","Entretenimento":"🎮","Roupas":"👕","Material Escolar":"📚","Compras":"🛍️","Saúde":"💊","Presentes":"🎁","Tecnologia":"💻","Bar da escola":"🧃","Outros":"✨"};
+const CAT_CORES ={"Alimentação":"#FF6B6B","Transporte":"#4ECDC4","Entretenimento":"#96CEB4","Roupas":"#FFB347","Material Escolar":"#45B7D1","Compras":"#DDA0DD","Saúde":"#98FB98","Presentes":"#FFD700","Tecnologia":"#87CEEB","Bar da escola":"#FF8C42","Outros":"#00E676"};
+const BAR_SUBCATS=["Salgados","Doces","Bebidas"];
+const MESES=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+const primeiroNome=(n)=>{if(!n||typeof n!=="string")return"Usuário";return n.split(" ")[0]||"Usuário";};
+
+// ════════════════════════════════════════════════════════════════
+//  🧠 PERFIL FINANCEIRO
+// ════════════════════════════════════════════════════════════════
+const PERGUNTAS=[
+  {id:"q1",texto:"Quando recebo dinheiro, geralmente:",opcoes:[{t:"Gasto quase tudo rapidamente",p:1},{t:"Gasto uma parte e guardo outra",p:2},{t:"Guardo a maior parte antes de gastar",p:3}]},
+  {id:"q2",texto:"Como descrevo meu controle financeiro:",opcoes:[{t:"Não tenho controle — gasto sem pensar",p:1},{t:"Tenho algum controle, mas erro às vezes",p:2},{t:"Acompanho tudo com cuidado",p:3}]},
+  {id:"q3",texto:"Meus gastos com lazer e compras impulsivas:",opcoes:[{t:"São frequentes e difíceis de evitar",p:1},{t:"Acontecem às vezes, mas me arrependo depois",p:2},{t:"São raros — penso muito antes de gastar",p:3}]},
+  {id:"q4",texto:"Quando tenho uma meta financeira:",opcoes:[{t:"Dificilmente consigo atingir",p:1},{t:"Às vezes consigo, com esforço",p:2},{t:"Costumo atingir — sou disciplinado(a)",p:3}]},
+  {id:"q5",texto:"No mês passado, minha situação financeira foi:",opcoes:[{t:"Gastei mais do que recebi",p:1},{t:"Equilibrei mais ou menos",p:2},{t:"Consegui guardar dinheiro",p:3}]},
+];
+function calcularPerfil(respostas){
+  const t=respostas.reduce((s,r)=>s+r,0);
+  if(t<=7)  return{tipo:"Gastador",   emoji:"🔥",cor:"#ff4455",desc:"Você tende a gastar sem planejar. Pequenas mudanças de hábito farão grande diferença!"};
+  if(t<=11) return{tipo:"Equilibrado",emoji:"⚖️",cor:"#FFB347",desc:"Você tem bom controle, mas ainda pode melhorar eliminando gastos impulsivos."};
+  return        {tipo:"Econômico",  emoji:"💎",cor:"#00E676",desc:"Parabéns! Você tem excelente disciplina financeira. Continue assim!"};
+}
+
+// ════════════════════════════════════════════════════════════════
+//  🤖 ATLAS IA — Contexto financeiro para o Claude
+// ════════════════════════════════════════════════════════════════
+function construirContextoFinanceiro(transacoes, perfil) {
+  const agora    = new Date();
+  const mesAtual = agora.getMonth();
+  const anoAtual = agora.getFullYear();
+
+  const despMes = transacoes.filter(t=>{
+    if(t.tipo!=="despesa") return false;
+    try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
+  });
+
+  // Calcular em centavos — precisão garantida
+  const receitasCents = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
+  const despesasCents = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
+  const saldoCents    = receitasCents - despesasCents;
+  const despMesCents  = somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+
+  const gastoCatCents = (cat) => somarCents(despMes.filter(t=>t.categoria===cat).map(t=>t.amountCents||toCents(t.amount)));
+  const topCats = CATEGORIAS.map(c=>({nome:c,cents:gastoCatCents(c)})).filter(c=>c.cents>0).sort((a,b)=>b.cents-a.cents);
+
+  const ultimas = [...transacoes].sort((a,b)=>(b.data||"").localeCompare(a.data||"")).slice(0,8);
+
+  return `
+DADOS FINANCEIROS DO USUÁRIO (mês atual: ${MESES[mesAtual]}/${anoAtual}):
+
+📊 RESUMO GERAL:
+- Receitas totais: ${fmt(receitasCents)}
+- Despesas totais: ${fmt(despesasCents)}
+- Saldo atual: ${fmtSaldo(saldoCents)} (${saldoCents>=0?"positivo":"NEGATIVO"})
+- Taxa de poupança: ${receitasCents>0?Math.round((saldoCents/receitasCents)*100):0}%
+
+📅 GASTOS DO MÊS ATUAL (${MESES[mesAtual]}):
+- Total gasto: ${fmt(despMesCents)}
+- Número de transações: ${despMes.length}
+${topCats.length>0?"Maiores categorias:\n"+topCats.slice(0,5).map(c=>`  • ${c.nome}: ${fmt(c.cents)}`).join("\n"):"- Sem despesas registradas este mês"}
+
+🏷️ TOP CATEGORIAS DE GASTO (geral):
+${CATEGORIAS.map(c=>{
+  const cents=somarCents(transacoes.filter(t=>t.tipo==="despesa"&&t.categoria===c).map(t=>t.amountCents||toCents(t.amount)));
+  return cents>0?`• ${c}: ${fmt(cents)}`:null;
+}).filter(Boolean).slice(0,6).join("\n")||"Nenhuma despesa registrada"}
+
+🧃 BAR DA ESCOLA (mês):
+${(()=>{const b=gastoCatCents("Bar da escola");return b>0?`${fmt(b)} gastos (${b>8000?"ALTO - acima de R$80":"dentro do limite"})`:"-";})()}
+
+🧠 PERFIL FINANCEIRO: ${perfil?`${perfil.emoji} ${perfil.tipo} — ${perfil.desc}`:"Não definido ainda"}
+
+📋 ÚLTIMAS TRANSAÇÕES:
+${ultimas.map(t=>`• ${t.data} | ${t.tipo==="receita"?"+":"-"}${fmt(t.amountCents||toCents(t.amount))} | ${t.categoria} | ${t.descricao||"sem descrição"}`).join("\n")||"Nenhuma transação"}
+`.trim();
+}
+
+// ════════════════════════════════════════════════════════════════
+//  🌐 CHAMADA À API DO CLAUDE (com fallback local)
+// ════════════════════════════════════════════════════════════════
+async function chamarClaudeAPI(mensagem, historico, transacoes, perfil) {
+  const contexto = construirContextoFinanceiro(transacoes, perfil);
+
+  const systemPrompt = `Você é o Atlas IA, assistente financeiro inteligente do aplicativo AtlasTrack, focado em ajudar estudantes do ensino médio a gerenciar suas finanças pessoais.
+
+Seu tom é: amigável, direto, motivador e educativo. Use linguagem jovem mas profissional.
+
+${contexto}
+
+INSTRUÇÕES:
+- Responda SEMPRE em português brasileiro
+- Use os dados financeiros reais do usuário para personalizar cada resposta
+- Formate com emojis relevantes para tornar a leitura mais agradável
+- Use **negrito** para destacar valores e informações importantes
+- Seja específico — mencione valores reais, categorias reais, padrões reais
+- Se o saldo for negativo, alerte com empatia mas firmeza
+- Se o perfil for "Gastador", ofereça dicas práticas e motivadoras
+- Limite respostas a 200 palavras para manter o chat fluido
+- Não invente dados que não estão no contexto acima`;
+
+  const mensagensAPI = [
+    ...historico.filter(m=>m.role!=="system").slice(-6).map(m=>({
+      role: m.role==="ia"?"assistant":"user",
+      content: m.texto
+    })),
+    { role:"user", content: mensagem }
+  ];
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:400,
+        system: systemPrompt,
+        messages: mensagensAPI,
+      })
+    });
+
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const data = await res.json();
+    const texto = data?.content?.find(b=>b.type==="text")?.text;
+    if (!texto) throw new Error("Resposta vazia");
+    return { texto, fonte:"claude" };
+  } catch(e) {
+    console.warn("Claude API indisponível, usando fallback:", e.message);
+    return { texto: respostaLocal(mensagem, transacoes, perfil), fonte:"local" };
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  🔄 FALLBACK — Respostas locais quando API está indisponível
+// ════════════════════════════════════════════════════════════════
+function respostaLocal(mensagem, transacoes, perfil) {
+  const msg=mensagem.toLowerCase().trim();
+  const agora=new Date(), mesAtual=agora.getMonth(), anoAtual=agora.getFullYear();
+
+  const despMes=transacoes.filter(t=>{
+    if(t.tipo!=="despesa") return false;
+    try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
+  });
+
+  const recCents  = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
+  const despCents = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
+  const saldoCents= recCents - despCents;
+  const despMesCents=somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+
+  const gastoCat=(cat)=>somarCents(despMes.filter(t=>t.categoria===cat).map(t=>t.amountCents||toCents(t.amount)));
+  const topCat=CATEGORIAS.map(c=>({nome:c,cents:gastoCat(c)})).sort((a,b)=>b.cents-a.cents).filter(c=>c.cents>0);
+  const perfilTipo=perfil?.tipo||"Equilibrado";
+
+  if(/(saldo|quanto.*(tenho|sobrou|resta)|dinheiro)/.test(msg)||msg==="saldo"){
+    return saldoCents>=0
+      ?`💚 Seu saldo atual é **${fmtSaldo(saldoCents)}**. Ótimo — receitas superam despesas! Continue registrando tudo.`
+      :`🔴 Seu saldo está **${fmtSaldo(saldoCents)}**. Hora de revisar gastos urgentemente!`;
+  }
+  if(/(resumo|análise|balanço|como.*estou|situação)/.test(msg)){
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    return `📊 **Resumo:**\n• Receitas: ${fmt(recCents)}\n• Despesas: ${fmt(despCents)}\n• Saldo: ${fmtSaldo(saldoCents)}\n• Poupança: ${taxa}%\n\nPerfil: **${perfilTipo}** — ${perfil?.desc||"continue acompanhando!"}`;
+  }
+  if(/(bar|cantina|lanche|salgado|doce|bebida)/.test(msg)){
+    const b=gastoCat("Bar da escola");
+    return b===0?`🧃 Sem gastos no **Bar da escola** este mês.`
+      :`🧃 Você gastou **${fmt(b)}** no bar este mês. ${b>8000?"⚠️ Está alto! Tente ficar abaixo de R$80,00.":"Está controlado!"}`;
+  }
+  if(/(alimenta|comida|almoço|restaurante)/.test(msg)){
+    const g=gastoCat("Alimentação");
+    return g===0?`🍔 Sem gastos com Alimentação este mês.`
+      :`🍔 **Alimentação:** ${fmt(g)} este mês. ${g>30000?"⚠️ Considere trazer marmita!":"✅ Dentro do limite."}`;
+  }
+  if(/(dica|econom|poupar|guardar|economizar)/.test(msg)){
+    const dicas=[
+      "💡 **Regra 50/30/20:** 50% necessidades, 30% desejos, 20% poupança.",
+      "💡 Espere **48h** antes de qualquer compra por impulso. Você ainda vai querer?",
+      "💡 Registre **todos os gastos**, até o menor. A consciência muda o comportamento!",
+      "💡 Crie uma **meta mensal de poupança** — mesmo R$50,00 faz diferença no hábito.",
+      "💡 Compare preços antes de comprar. Pequenas diferenças acumulam muito ao longo do ano.",
+    ];
+    return dicas[Math.floor(Math.random()*dicas.length)];
+  }
+  if(/(maior.*gasto|onde.*gast|categoria)/.test(msg)){
+    return topCat.length===0?`📂 Sem despesas registradas este mês.`
+      :`📂 Maior gasto: **${topCat[0].nome}** com **${fmt(topCat[0].cents)}**. ${topCat[0].cents>20000?"Atenção — está pesando no orçamento!":"Ainda aceitável."}`;
+  }
+  if(/(perfil|meu.*tipo|como.*classificado)/.test(msg)){
+    return perfil
+      ?`🧠 Perfil: **${perfil.emoji} ${perfil.tipo}**\n\n${perfil.desc}`
+      :`🧠 Você ainda não fez o questionário de perfil. Vai aparecer na próxima vez que você abrir o app!`;
+  }
+  if(/(mês|mensal|este.*mes|esse.*mes)/.test(msg)){
+    return despMes.length===0?`📅 Sem despesas este mês ainda.`
+      :`📅 **Este mês:** ${fmt(despMesCents)} em ${despMes.length} transações.\n${topCat.slice(0,2).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}`;
+  }
+  if(/(olá|oi|ola|hey|bom dia|boa tarde|tudo bem)/.test(msg)){
+    return `👋 Olá! Sou o **Atlas IA**.\n\nPosso analisar: saldo, gastos do mês, bar da escola, categorias, perfil e dicas. O que quer saber?`;
+  }
+  if(topCat.length>0){
+    return `🤔 Não entendi, mas: seu maior gasto este mês é **${topCat[0].nome}** (${fmt(topCat[0].cents)}). Tente perguntar sobre "saldo", "resumo", "dicas" ou "bar da escola".`;
+  }
+  return `🤔 Tente perguntar sobre: **saldo**, **resumo**, **dicas de economia**, **bar da escola** ou **meu perfil**.`;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  📊 DADOS DE DEMONSTRAÇÃO (em centavos)
+// ════════════════════════════════════════════════════════════════
+function popularDemo(userId) {
+  try {
+    const ag=new Date(), ano=ag.getFullYear(), mes=ag.getMonth();
+    const txs=DB.transacoes();
+    // amountCents: valores em centavos (inteiros) — zero erro de ponto flutuante
+    [
+      {amountCents:120000,tipo:"receita",categoria:"Outros",        descricao:"Mesada mensal",           data:new Date(ano,mes,1).toISOString().slice(0,10)},
+      {amountCents:4550,  tipo:"despesa",categoria:"Alimentação",   descricao:"Almoço na escola",        data:new Date(ano,mes,3).toISOString().slice(0,10)},
+      {amountCents:2800,  tipo:"despesa",categoria:"Transporte",    descricao:"Passe de ônibus",         data:new Date(ano,mes,5).toISOString().slice(0,10)},
+      {amountCents:8990,  tipo:"despesa",categoria:"Material Escolar",descricao:"Cadernos e canetas",   data:new Date(ano,mes,7).toISOString().slice(0,10)},
+      {amountCents:3500,  tipo:"despesa",categoria:"Entretenimento",descricao:"Netflix + Spotify",       data:new Date(ano,mes,10).toISOString().slice(0,10)},
+      {amountCents:20000, tipo:"receita",categoria:"Outros",        descricao:"Presente de aniversário", data:new Date(ano,mes,12).toISOString().slice(0,10)},
+      {amountCents:1500,  tipo:"despesa",categoria:"Bar da escola", descricao:"Lanche — Salgados",       data:new Date(ano,mes,13).toISOString().slice(0,10),subcat:"Salgados"},
+      {amountCents:6730,  tipo:"despesa",categoria:"Roupas",        descricao:"Camiseta nova",           data:new Date(ano,mes,15).toISOString().slice(0,10)},
+      {amountCents:1000,  tipo:"despesa",categoria:"Bar da escola", descricao:"Bebidas — Suco",          data:new Date(ano,mes,16).toISOString().slice(0,10),subcat:"Bebidas"},
+      {amountCents:2200,  tipo:"despesa",categoria:"Alimentação",   descricao:"Lanches",                 data:new Date(ano,mes,18).toISOString().slice(0,10)},
+      {amountCents:4990,  tipo:"despesa",categoria:"Tecnologia",    descricao:"App de música anual",     data:new Date(ano,mes,20).toISOString().slice(0,10)},
+    ].forEach(d=>txs.push({id:DB.uid(),userId,...d,criadoEm:new Date().toISOString()}));
+    DB.salvarTransacoes(txs);
+    const metas=DB.metas();
+    metas.push({id:DB.uid(),userId,nomeMeta:"Notebook Novo",    valorAlvoCents:250000,valorGuardadoCents:45000,prazo:new Date(ano,mes+4,1).toISOString().slice(0,10),criadoEm:new Date().toISOString()});
+    metas.push({id:DB.uid(),userId,nomeMeta:"Festa de Formatura",valorAlvoCents:80000,valorGuardadoCents:32000,prazo:new Date(ano,mes+2,1).toISOString().slice(0,10),criadoEm:new Date().toISOString()});
+    DB.salvarMetas(metas);
+    const perfis=DB.perfis();
+    perfis.push({userId,...calcularPerfil([2,2,2,2,2]),respondidoEm:new Date().toISOString()});
+    DB.salvarPerfis(perfis);
+  } catch(e){console.error(e);}
+}
+
+// ════════════════════════════════════════════════════════════════
+//  📈 COMPONENTES VISUAIS
+// ════════════════════════════════════════════════════════════════
+function GraficoBarras({data=[],cor="#00E676",altura=80}){
+  if(!data.length) return <div style={{height:altura}}/>;
+  const max=Math.max(...data.map(d=>d.valor||0),1);
+  return(
+    <div style={{display:"flex",alignItems:"flex-end",gap:6,height:altura,width:"100%"}}>
+      {data.map((d,i)=>(
+        <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,height:"100%"}}>
+          <div style={{flex:1,display:"flex",alignItems:"flex-end",width:"100%"}}>
+            <div style={{width:"100%",background:cor,borderRadius:"4px 4px 0 0",height:`${Math.max(((d.valor||0)/max)*100,(d.valor||0)>0?6:0)}%`,transition:"height 0.6s cubic-bezier(.34,1.56,.64,1)",opacity:0.65+0.35*((d.valor||0)/max)}}/>
+          </div>
+          <span style={{fontSize:9,color:"#666",whiteSpace:"nowrap"}}>{d.rotulo}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GraficoRosca({segmentos=[],tamanho=140}){
+  const total=segmentos.reduce((s,x)=>s+(x.valor||0),0);
+  if(!total) return <div style={{width:tamanho,height:tamanho,borderRadius:"50%",background:"#1e1e1e",margin:"0 auto"}}/>;
+  let ac=0;
+  return(
+    <svg width={tamanho} height={tamanho} style={{display:"block",margin:"0 auto"}}>
+      {segmentos.map((seg,i)=>{
+        const pct=(seg.valor||0)/total,ini=ac;ac+=pct;
+        const a1=(ini-0.25)*2*Math.PI,a2=(ac-0.25)*2*Math.PI;
+        const r=tamanho/2-10,cx=tamanho/2,cy=tamanho/2;
+        const x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1),x2=cx+r*Math.cos(a2),y2=cy+r*Math.sin(a2);
+        return <path key={i} d={`M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${pct>0.5?1:0},1 ${x2},${y2} Z`} fill={seg.cor||"#555"} stroke="#121212" strokeWidth={2}/>;
+      })}
+      <circle cx={tamanho/2} cy={tamanho/2} r={tamanho/2-28} fill="#121212"/>
+      <text x={tamanho/2} y={tamanho/2-4} textAnchor="middle" fill="#00E676" fontSize={13} fontWeight="bold">{segmentos.length}</text>
+      <text x={tamanho/2} y={tamanho/2+14} textAnchor="middle" fill="#666" fontSize={9}>categorias</text>
+    </svg>
+  );
+}
+
+function Anel({pct=0,tam=60,traco=6,cor="#00E676"}){
+  const r=(tam-traco)/2,c=2*Math.PI*r,p=isNaN(pct)?0:Math.min(Math.max(pct,0),1);
+  return(
+    <svg width={tam} height={tam}>
+      <circle cx={tam/2} cy={tam/2} r={r} fill="none" stroke="#1e1e1e" strokeWidth={traco}/>
+      <circle cx={tam/2} cy={tam/2} r={r} fill="none" stroke={cor} strokeWidth={traco}
+        strokeDasharray={`${c*p} ${c}`} strokeLinecap="round"
+        transform={`rotate(-90 ${tam/2} ${tam/2})`} style={{transition:"stroke-dasharray 0.8s ease"}}/>
+      <text x={tam/2} y={tam/2+4} textAnchor="middle" fill="#fff" fontSize={11} fontWeight="bold">{Math.round(p*100)}%</text>
+    </svg>
+  );
+}
+
+// Renderiza **negrito** e quebras de linha do markdown simples
+function TextoIA({texto=""}){
+  return(
+    <span style={{display:"block",lineHeight:1.65,fontSize:13.5}}>
+      {texto.split("\n").map((l,i)=>(
+        <span key={i} style={{display:"block",marginBottom:l===""?6:2}}>
+          {l.split(/\*\*(.*?)\*\*/g).map((p,j)=>j%2===1?<strong key={j}>{p}</strong>:<span key={j}>{p}</span>)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  🎨 ESTILOS BASE
+// ════════════════════════════════════════════════════════════════
+const S={
+  app:     {background:"#121212",minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:"'DM Sans',system-ui,sans-serif",color:"#fff",position:"relative"},
+  tela:    {padding:"0 0 90px",minHeight:"100vh"},
+  cab:     {padding:"50px 20px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"},
+  card:    {background:"#1a1a1a",borderRadius:20,padding:20,marginBottom:16},
+  dest:    {background:"linear-gradient(135deg,#00E676,#00C853)",borderRadius:24,padding:24,marginBottom:16,color:"#000"},
+  inp:     {width:"100%",background:"#1e1e1e",border:"1.5px solid #2a2a2a",borderRadius:14,padding:"14px 16px",color:"#fff",fontSize:15,outline:"none",boxSizing:"border-box",fontFamily:"inherit",transition:"border-color 0.2s"},
+  rot:     {fontSize:11,color:"#666",fontWeight:700,letterSpacing:0.8,textTransform:"uppercase",display:"block",marginBottom:6},
+  btn:     {width:"100%",background:"#00E676",border:"none",borderRadius:14,padding:"15px",color:"#000",fontSize:15,fontWeight:800,cursor:"pointer",fontFamily:"inherit"},
+  btnSm:   {background:"#00E676",border:"none",borderRadius:10,padding:"8px 14px",color:"#000",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"},
+  btnG:    {background:"transparent",border:"1.5px solid #2a2a2a",borderRadius:10,padding:"8px 14px",color:"#888",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"},
+  nav:     {position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#0a0a0a",borderTop:"1px solid #1e1e1e",display:"flex",zIndex:100,paddingBottom:4},
+  navB:    (a)=>({flex:1,padding:"10px 0 6px",display:"flex",flexDirection:"column",alignItems:"center",gap:3,background:"none",border:"none",cursor:"pointer",color:a?"#00E676":"#3a3a3a",transition:"color 0.2s",fontFamily:"inherit"}),
+  chip:    (a)=>({padding:"7px 13px",borderRadius:20,border:"1.5px solid",borderColor:a?"#00E676":"#2a2a2a",background:a?"#00E67622":"transparent",color:a?"#00E676":"#666",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",fontFamily:"inherit",flexShrink:0}),
+  badge:   (t)=>({background:t==="receita"?"#00E67622":"#ff445522",color:t==="receita"?"#00E676":"#ff6666",borderRadius:8,padding:"3px 9px",fontSize:11,fontWeight:700}),
+  row:     {display:"flex",justifyContent:"space-between",alignItems:"center"},
+  sep:     {height:1,background:"#222",margin:"8px 0"},
+  erro:    {color:"#ff6b6b",fontSize:13,textAlign:"center",padding:"6px 0"},
+  toast:   (ok)=>({position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",background:ok?"#00E676":"#ff6b6b",color:"#000",padding:"12px 22px",borderRadius:40,fontWeight:700,fontSize:14,zIndex:999,whiteSpace:"nowrap",boxShadow:"0 8px 32px rgba(0,0,0,0.5)",pointerEvents:"none"}),
+  fi:      (e)=>{e.target.style.borderColor="#00E676";},
+  fo:      (e)=>{e.target.style.borderColor="#2a2a2a";},
+};
+
+// ════════════════════════════════════════════════════════════════
+//  🚀 APP
+// ════════════════════════════════════════════════════════════════
+export default function AtlasTrack(){
+  const [usuario,    setUsuario]   =useState(()=>{try{const t=localStorage.getItem("atv3_token");return t?lerJWT(t):null;}catch{return null;}});
+  const [telAuth,    setTelAuth]   =useState("login");
+  const [aba,        setAba]       =useState("painel");
+  const [aviso,      setAviso]     =useState(null);
+  const [carregando, setCarregando]=useState(false);
+  const [formAuth,   setFormAuth]  =useState({nome:"",email:"",senha:""});
+  const [erroAuth,   setErroAuth]  =useState("");
+
+  // Perfil
+  const [mostrarQ,setMostrarQ]=useState(false);
+  const [etapaQ,  setEtapaQ]  =useState(0);
+  const [respQ,   setRespQ]   =useState([]);
+  const [perfil,  setPerfil]  =useState(null);
+
+  // Transações — input em reais (string), salvo em centavos
+  const [inputValor, setInputValor]=useState("");
+  const [formTx, setFormTx]=useState({tipo:"despesa",categoria:"Alimentação",descricao:"",data:new Date().toISOString().slice(0,10),subcat:""});
+
+  // Metas — inputs em reais (string), salvo em centavos
+  const [inputAlvo,     setInputAlvo]    =useState("");
+  const [inputGuardado, setInputGuardado]=useState("");
+  const [formMeta, setFormMeta]=useState({nomeMeta:"",prazo:""});
+  const [editarMeta,setEditarMeta]=useState(null);
+
+  // Filtros
+  const [filtroCategoria,setFiltroCategoria]=useState("Todas");
+  const [filtroData,     setFiltroData]     =useState("");
+  const [filtroTipo,     setFiltroTipo]     =useState("Todos");
+
+  // Dados
+  const [transacoes,setTransacoes]=useState([]);
+  const [metas,     setMetas]     =useState([]);
+
+  // Atlas IA
+  const [msgIA,  setMsgIA] =useState("");
+  const [chatIA, setChatIA]=useState([]);
+  const [digIA,  setDigIA] =useState(false);
+  const [fonteIA,setFonteIA]=useState("claude"); // "claude" | "local"
+  const chatRef=useRef(null);
+
+  const mostrarAviso=(msg,ok=true)=>{setAviso({msg,ok});setTimeout(()=>setAviso(null),2800);};
+
+  const carregarDados=useCallback((uid)=>{
+    try{
+      setTransacoes(DB.txDoUsuario(uid));
+      setMetas(DB.metasDoUsuario(uid));
+      const p=DB.perfilDoUsuario(uid);
+      if(p) setPerfil(p);
+    }catch{}
+  },[]);
+
+  useEffect(()=>{
+    if(usuario?.id){
+      carregarDados(usuario.id);
+      if(!DB.perfilDoUsuario(usuario.id)) setMostrarQ(true);
+    }
+  },[usuario,carregarDados]);
+
+  useEffect(()=>{
+    if(chatRef.current) chatRef.current.scrollTop=chatRef.current.scrollHeight;
+  },[chatIA,digIA]);
+
+  // ── AUTH ────────────────────────────────────────────────────
+  const registrar=async()=>{
+    setErroAuth(""); setCarregando(true);
+    try{
+      const nome=san(formAuth.nome), email=san(formAuth.email).toLowerCase(), senha=formAuth.senha;
+      if(!nome||!email||!senha){setErroAuth("Todos os campos são obrigatórios");return;}
+      if(nome.length<2){setErroAuth("Nome muito curto");return;}
+      if(!validarEmail(email)){setErroAuth("E-mail inválido");return;}
+      if(senha.length<6){setErroAuth("Senha deve ter mínimo 6 caracteres");return;}
+      const usuarios=DB.usuarios();
+      if(usuarios.find(u=>u.email===email)){setErroAuth("E-mail já cadastrado");return;}
+      const senhaCript=await hashSenha(senha);
+      const novo={id:DB.uid(),nome,email,senha:senhaCript,criadoEm:new Date().toISOString()};
+      usuarios.push(novo); DB.salvarUsuarios(usuarios);
+      popularDemo(novo.id);
+      const t=criarJWT({id:novo.id,nome,email});
+      localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
+    }catch{setErroAuth("Erro ao criar conta.");}finally{setCarregando(false);}
+  };
+
+  const entrar=async()=>{
+    setErroAuth(""); setCarregando(true);
+    try{
+      const email=san(formAuth.email).toLowerCase(), senha=formAuth.senha;
+      if(!email||!senha){setErroAuth("Preencha e-mail e senha");return;}
+      if(!validarEmail(email)){setErroAuth("E-mail inválido");return;}
+      const enc=DB.usuarios().find(u=>u.email===email);
+      if(!enc){setErroAuth("Conta não encontrada");return;}
+      if(!await verificarSenha(senha,enc.senha)){setErroAuth("Senha incorreta");return;}
+      const t=criarJWT({id:enc.id,nome:enc.nome,email:enc.email});
+      localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
+    }catch{setErroAuth("Erro ao entrar.");}finally{setCarregando(false);}
+  };
+
+  const sair=()=>{
+    localStorage.removeItem("atv3_token");
+    setUsuario(null); setTransacoes([]); setMetas([]); setPerfil(null);
+    setFormAuth({nome:"",email:"",senha:""}); setTelAuth("login"); setAba("painel");
+    setChatIA([]); setMostrarQ(false); setEtapaQ(0); setRespQ([]);
+  };
+
+  // ── PERFIL ──────────────────────────────────────────────────
+  const responderQ=(pontos)=>{
+    const novas=[...respQ,pontos];
+    if(etapaQ+1>=PERGUNTAS.length){
+      const resultado=calcularPerfil(novas);
+      const perfis=DB.perfis().filter(p=>p.userId!==usuario.id);
+      perfis.push({userId:usuario.id,...resultado,respondidoEm:new Date().toISOString()});
+      DB.salvarPerfis(perfis); setPerfil(resultado);
+      setMostrarQ(false); setEtapaQ(0); setRespQ([]);
+      mostrarAviso(`Perfil: ${resultado.emoji} ${resultado.tipo}!`);
+    }else{ setRespQ(novas); setEtapaQ(etapaQ+1); }
+  };
+
+  // ── TRANSAÇÕES ───────────────────────────────────────────────
+  const adicionarTransacao=(valorCentsOverride=null,subcatOverride=null)=>{
+    // Converter input de reais para centavos com Math.round — elimina flutuação
+    const cents=valorCentsOverride!==null ? valorCentsOverride : toCents(inputValor);
+    if(!cents||cents<=0){mostrarAviso("Informe um valor válido",false);return;}
+    const cat=formTx.categoria;
+    const desc=san(subcatOverride||formTx.descricao);
+    if(cat==="Outros"&&!desc){mostrarAviso("Descrição obrigatória para 'Outros'",false);return;}
+    const txs=DB.transacoes();
+    txs.push({id:DB.uid(),userId:usuario.id,amountCents:cents,tipo:formTx.tipo,categoria:cat,descricao:desc,subcat:san(formTx.subcat||""),data:formTx.data,criadoEm:new Date().toISOString()});
+    DB.salvarTransacoes(txs); carregarDados(usuario.id);
+    setInputValor(""); setFormTx({tipo:"despesa",categoria:"Alimentação",descricao:"",data:new Date().toISOString().slice(0,10),subcat:""});
+    mostrarAviso("Transação adicionada! ✓"); setAba("painel");
+  };
+
+  const excluirTx=(id)=>{
+    const tx=DB.transacoes().find(t=>t.id===id);
+    if(!tx||tx.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    DB.salvarTransacoes(DB.transacoes().filter(t=>t.id!==id)); carregarDados(usuario.id);
+    mostrarAviso("Transação removida");
+  };
+
+  // ── METAS ───────────────────────────────────────────────────
+  const salvarMeta=()=>{
+    const nome=san(formMeta.nomeMeta);
+    const alvoCents=toCents(inputAlvo);
+    if(!nome||!alvoCents){mostrarAviso("Nome e valor alvo obrigatórios",false);return;}
+    const guardadoCents=toCents(inputGuardado)||0;
+    const ms=DB.metas();
+    if(editarMeta){
+      const idx=ms.findIndex(m=>m.id===editarMeta.id&&m.userId===usuario.id);
+      if(idx>=0) ms[idx]={...ms[idx],nomeMeta:nome,valorAlvoCents:alvoCents,valorGuardadoCents:guardadoCents,prazo:formMeta.prazo};
+    }else{
+      ms.push({id:DB.uid(),userId:usuario.id,nomeMeta:nome,valorAlvoCents:alvoCents,valorGuardadoCents:guardadoCents,prazo:formMeta.prazo,criadoEm:new Date().toISOString()});
+    }
+    DB.salvarMetas(ms); carregarDados(usuario.id);
+    const era=!!editarMeta;
+    setFormMeta({nomeMeta:"",prazo:""}); setInputAlvo(""); setInputGuardado(""); setEditarMeta(null);
+    mostrarAviso(era?"Meta atualizada! ✓":"Meta criada! ✓"); setAba("metas");
+  };
+
+  const excluirMeta=(id)=>{
+    const m=DB.metas().find(x=>x.id===id);
+    if(!m||m.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    DB.salvarMetas(DB.metas().filter(x=>x.id!==id)); carregarDados(usuario.id);
+    mostrarAviso("Meta removida");
+  };
+
+  // ── ATLAS IA ─────────────────────────────────────────────────
+  const enviarMsgIA=async()=>{
+    const texto=san(msgIA);
+    if(!texto||digIA) return;
+    const novaMsgUser={role:"user",texto,id:Date.now()};
+    const novoChat=[...chatIA,novaMsgUser];
+    setChatIA(novoChat); setMsgIA(""); setDigIA(true);
+    try{
+      const {texto:resposta,fonte}=await chamarClaudeAPI(texto,novoChat,transacoes,perfil);
+      setChatIA(prev=>[...prev,{role:"ia",texto:resposta,id:Date.now()+1,fonte}]);
+      setFonteIA(fonte);
+    }catch{
+      const fb=respostaLocal(texto,transacoes,perfil);
+      setChatIA(prev=>[...prev,{role:"ia",texto:fb,id:Date.now()+1,fonte:"local"}]);
+      setFonteIA("local");
+    }finally{ setDigIA(false); }
+  };
+
+  // ── CÁLCULOS CENTRALIZADOS (todos em centavos) ──────────────
+  const getCents=(tx)=>tx.amountCents||toCents(tx.amount);
+  const agora=new Date(), mesAtual=agora.getMonth(), anoAtual=agora.getFullYear();
+
+  const receitasCents = somarCents(transacoes.filter(t=>t.tipo==="receita").map(getCents));
+  const despesasCents = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(getCents));
+  const saldoCents    = receitasCents - despesasCents;
+
+  const isMesAtual=(t)=>{
+    try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
+  };
+  const gastoBarCents = somarCents(transacoes.filter(t=>t.tipo==="despesa"&&t.categoria==="Bar da escola"&&isMesAtual(t)).map(getCents));
+
+  const txFiltradas=transacoes.filter(t=>{
+    if(filtroCategoria!=="Todas"&&t.categoria!==filtroCategoria)return false;
+    if(filtroData&&t.data!==filtroData)return false;
+    if(filtroTipo!=="Todos"&&t.tipo!==filtroTipo)return false;
+    return true;
+  }).sort((a,b)=>(b.data||"").localeCompare(a.data||""));
+
+  const dadosCat=CATEGORIAS.map(c=>({
+    rotulo:c.split(" ")[0],
+    valor:somarCents(transacoes.filter(t=>t.tipo==="despesa"&&t.categoria===c).map(getCents)),
+    cor:CAT_CORES[c],nome:c
+  })).filter(c=>c.valor>0);
+
+  const dadosMensais=Array.from({length:6},(_,i)=>{
+    const d=new Date(); d.setMonth(d.getMonth()-5+i);
+    const m=d.getMonth(),y=d.getFullYear();
+    return{rotulo:MESES[m],valor:somarCents(transacoes.filter(t=>{try{const dt=new Date(t.data+"T00:00:00");return t.tipo==="despesa"&&dt.getMonth()===m&&dt.getFullYear()===y;}catch{return false;}}).map(getCents))};
+  });
+
+  const txRecentes=[...transacoes].sort((a,b)=>(b.data||"").localeCompare(a.data||"")).slice(0,5);
+
+  // ══════════════════════════════════════════════════════════════
+  //  AUTH SCREEN
+  // ══════════════════════════════════════════════════════════════
+  if(!usuario){
+    const eCad=telAuth==="cadastro";
+    return(
+      <div style={S.app}>
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
+        <div style={{padding:"60px 28px 40px",display:"flex",flexDirection:"column",minHeight:"100vh"}}>
+          <div style={{textAlign:"center",marginBottom:44}}>
+            <div style={{width:72,height:72,borderRadius:22,background:"#00E676",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px",fontSize:32,boxShadow:"0 8px 32px #00E67644"}}>⚡</div>
+            <h1 style={{fontSize:30,fontWeight:900,letterSpacing:-1.5,color:"#00E676",margin:0}}>AtlasTrack</h1>
+            <p style={{color:"#444",fontSize:13,margin:"6px 0 0"}}>Carregue suas finanças com confiança</p>
+          </div>
+          <div style={{display:"flex",background:"#1a1a1a",borderRadius:16,padding:4,marginBottom:28}}>
+            {[["login","Entrar"],["cadastro","Criar conta"]].map(([s,l])=>(
+              <button key={s} onClick={()=>{setTelAuth(s);setErroAuth("");}}
+                style={{flex:1,padding:"11px",border:"none",borderRadius:12,cursor:"pointer",fontWeight:700,fontSize:14,fontFamily:"inherit",transition:"all 0.2s",background:telAuth===s?"#00E676":"transparent",color:telAuth===s?"#000":"#555"}}>{l}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {eCad&&<div><label style={S.rot}>Nome Completo</label><input style={S.inp} placeholder="Seu nome" value={formAuth.nome} onChange={e=>setFormAuth({...formAuth,nome:e.target.value})} onFocus={S.fi} onBlur={S.fo}/></div>}
+            <div><label style={S.rot}>E-mail</label><input style={S.inp} type="email" placeholder="voce@email.com" value={formAuth.email} onChange={e=>setFormAuth({...formAuth,email:e.target.value})} onFocus={S.fi} onBlur={S.fo}/></div>
+            <div><label style={S.rot}>Senha</label><input style={S.inp} type="password" placeholder="••••••" value={formAuth.senha} onChange={e=>setFormAuth({...formAuth,senha:e.target.value})} onFocus={S.fi} onBlur={S.fo}/></div>
+            {erroAuth&&<p style={S.erro}>{erroAuth}</p>}
+            <button style={{...S.btn,marginTop:8,opacity:carregando?0.7:1}} onClick={eCad?registrar:entrar} disabled={carregando}>
+              {carregando?"Aguarde...":eCad?"Criar Conta":"Entrar"}
+            </button>
+          </div>
+          <p style={{color:"#2a2a2a",fontSize:11,textAlign:"center",marginTop:"auto",paddingTop:28}}>🔒 Dados criptografados localmente</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  QUESTIONÁRIO
+  // ══════════════════════════════════════════════════════════════
+  if(mostrarQ){
+    const q=PERGUNTAS[etapaQ];
+    return(
+      <div style={S.app}>
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
+        <div style={{padding:"50px 24px",display:"flex",flexDirection:"column",minHeight:"100vh"}}>
+          <div style={{textAlign:"center",marginBottom:28}}>
+            <div style={{fontSize:40,marginBottom:10}}>🧠</div>
+            <h2 style={{margin:0,fontSize:20,fontWeight:800,color:"#00E676"}}>Perfil Financeiro</h2>
+            <p style={{color:"#555",fontSize:13,margin:"6px 0 0"}}>Identifique seu comportamento com dinheiro</p>
+          </div>
+          <div style={{background:"#1e1e1e",borderRadius:8,height:6,marginBottom:24,overflow:"hidden"}}>
+            <div style={{width:`${(etapaQ/PERGUNTAS.length)*100}%`,height:"100%",background:"#00E676",borderRadius:8,transition:"width 0.4s ease"}}/>
+          </div>
+          <div style={{...S.card,flex:1}}>
+            <p style={{fontSize:12,color:"#555",fontWeight:600,marginBottom:8}}>Pergunta {etapaQ+1} de {PERGUNTAS.length}</p>
+            <p style={{fontSize:17,fontWeight:700,lineHeight:1.5,margin:"0 0 22px",color:"#fff"}}>{q.texto}</p>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {q.opcoes.map((op,i)=>(
+                <button key={i} onClick={()=>responderQ(op.p)}
+                  style={{background:"#121212",border:"1.5px solid #2a2a2a",borderRadius:14,padding:"14px 16px",color:"#ccc",fontSize:14,fontWeight:500,cursor:"pointer",textAlign:"left",fontFamily:"inherit",transition:"all 0.15s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor="#00E676";e.currentTarget.style.color="#fff";}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#2a2a2a";e.currentTarget.style.color="#ccc";}}>
+                  {op.t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button onClick={()=>setMostrarQ(false)} style={{...S.btnG,marginTop:14,fontSize:12}}>Pular por agora</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  PAINEL
+  // ══════════════════════════════════════════════════════════════
+  const renderPainel=()=>(
+    <div style={S.tela}>
+      <div style={S.cab}>
+        <div>
+          <p style={{color:"#555",fontSize:13,margin:0}}>Olá,</p>
+          <h2 style={{margin:"2px 0 0",fontSize:22,fontWeight:800}}>{primeiroNome(usuario.nome)} 👋</h2>
+        </div>
+        <button onClick={sair} style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,padding:"8px 14px",color:"#555",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Sair</button>
+      </div>
+      <div style={{padding:"0 20px"}}>
+        <div style={{...S.dest,background:saldoCents<0?"linear-gradient(135deg,#ff4455,#cc2233)":"linear-gradient(135deg,#00E676,#00C853)"}}>
+          <p style={{margin:0,fontSize:11,fontWeight:700,opacity:0.6,letterSpacing:1,textTransform:"uppercase"}}>Saldo Total</p>
+          <h1 style={{margin:"6px 0 4px",fontSize:34,fontWeight:900,letterSpacing:-2}}>{fmtSaldo(saldoCents)}</h1>
+          <p style={{margin:0,fontSize:12,opacity:0.6}}>{agora.toLocaleDateString("pt-BR",{month:"long",year:"numeric"})}</p>
+          <div style={{display:"flex",gap:12,marginTop:18}}>
+            {[["RECEITAS",receitasCents],["DESPESAS",despesasCents]].map(([l,v])=>(
+              <div key={l} style={{flex:1,background:"rgba(0,0,0,0.18)",borderRadius:12,padding:"10px 14px"}}>
+                <p style={{margin:0,fontSize:9,fontWeight:700,opacity:0.7,letterSpacing:1}}>{l}</p>
+                <p style={{margin:"4px 0 0",fontSize:16,fontWeight:800}}>{fmtC(v)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {perfil&&(
+          <div style={{...S.card,border:`1.5px solid ${perfil.cor}33`,marginBottom:16}}>
+            <div style={S.row}>
+              <div>
+                <p style={{margin:0,fontSize:11,color:"#555",fontWeight:600,letterSpacing:0.5,textTransform:"uppercase"}}>Perfil Financeiro</p>
+                <p style={{margin:"4px 0 0",fontSize:18,fontWeight:800,color:perfil.cor}}>{perfil.emoji} {perfil.tipo}</p>
+              </div>
+              <button onClick={()=>setMostrarQ(true)} style={{background:"transparent",border:`1px solid ${perfil.cor}55`,borderRadius:10,padding:"6px 12px",color:perfil.cor,fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>Refazer</button>
+            </div>
+            <p style={{margin:"8px 0 0",fontSize:12,color:"#888",lineHeight:1.5}}>{perfil.desc}</p>
+          </div>
+        )}
+
+        {gastoBarCents>0&&(
+          <div style={{...S.card,border:"1.5px solid #FF8C4233",background:"#FF8C4208",marginBottom:16}}>
+            <div style={S.row}>
+              <div>
+                <p style={{margin:0,fontSize:11,color:"#FF8C42",fontWeight:700,letterSpacing:0.5}}>🧃 BAR DA ESCOLA — ESTE MÊS</p>
+                <p style={{margin:"4px 0 0",fontSize:20,fontWeight:800,color:"#fff"}}>{fmt(gastoBarCents)}</p>
+              </div>
+              {gastoBarCents>8000&&<span style={{background:"#FF8C4222",color:"#FF8C42",borderRadius:8,padding:"4px 10px",fontSize:11,fontWeight:700}}>⚠️ Alto</span>}
+            </div>
+            {gastoBarCents>8000&&<p style={{margin:"8px 0 0",fontSize:12,color:"#888"}}>Você está gastando muito no bar. Tente manter abaixo de R$80,00!</p>}
+          </div>
+        )}
+
+        <div style={S.card}>
+          <div style={{...S.row,marginBottom:14}}>
+            <span style={{fontWeight:700,fontSize:15}}>Gastos Mensais</span>
+            <span style={{fontSize:12,color:"#555"}}>Últimos 6 meses</span>
+          </div>
+          <GraficoBarras data={dadosMensais} altura={90}/>
+        </div>
+
+        <div style={S.card}>
+          <div style={{...S.row,marginBottom:12}}>
+            <span style={{fontWeight:700,fontSize:15}}>Transações Recentes</span>
+            <button onClick={()=>setAba("historico")} style={{background:"none",border:"none",color:"#00E676",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Ver tudo</button>
+          </div>
+          {txRecentes.length===0&&<p style={{color:"#444",textAlign:"center",padding:"18px 0",margin:0}}>Nenhuma transação ainda</p>}
+          {txRecentes.map((t,i)=>(
+            <div key={t.id}>
+              {i>0&&<div style={S.sep}/>}
+              <div style={{...S.row,padding:"8px 0"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <div style={{width:40,height:40,borderRadius:12,background:t.tipo==="receita"?"#00E67618":"#ff444518",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{CAT_ICONES[t.categoria]||"💰"}</div>
+                  <div>
+                    <p style={{margin:0,fontSize:14,fontWeight:600}}>{t.descricao||t.categoria||"—"}</p>
+                    <p style={{margin:0,fontSize:11,color:"#555"}}>{t.data} · {t.categoria}</p>
+                  </div>
+                </div>
+                <span style={{fontWeight:800,color:t.tipo==="receita"?"#00E676":"#ff6666",fontSize:15,flexShrink:0}}>
+                  {t.tipo==="receita"?"+":"-"}{fmt(getCents(t))}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={()=>setAba("adicionar")} style={{...S.btn,marginTop:4}}>+ Adicionar Transação</button>
+      </div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  ADICIONAR TRANSAÇÃO
+  // ══════════════════════════════════════════════════════════════
+  const renderAdicionar=()=>{
+    const isBar=formTx.categoria==="Bar da escola";
+    const isOutros=formTx.categoria==="Outros";
+    return(
+      <div style={S.tela}>
+        <div style={S.cab}><h2 style={{margin:0,fontSize:22,fontWeight:800}}>Nova Transação</h2></div>
+        <div style={{padding:"0 20px",display:"flex",flexDirection:"column",gap:14}}>
+          <div style={{display:"flex",background:"#1a1a1a",borderRadius:16,padding:4}}>
+            {[["despesa","💸 Despesa"],["receita","💰 Receita"]].map(([tipo,label])=>(
+              <button key={tipo} onClick={()=>setFormTx({...formTx,tipo})}
+                style={{flex:1,padding:"11px",border:"none",borderRadius:12,cursor:"pointer",fontWeight:700,fontSize:14,fontFamily:"inherit",transition:"all 0.2s",background:formTx.tipo===tipo?(tipo==="receita"?"#00E676":"#ff4455"):"transparent",color:formTx.tipo===tipo?"#000":"#555"}}>{label}</button>
+            ))}
+          </div>
+
+          <div>
+            <label style={S.rot}>Valor (R$)</label>
+            <input style={{...S.inp,fontSize:26,fontWeight:900,textAlign:"center"}} type="number" min="0" step="0.01" placeholder="0,00"
+              value={inputValor} onChange={e=>setInputValor(e.target.value)} onFocus={S.fi} onBlur={S.fo}/>
+            {inputValor&&toCents(inputValor)>0&&(
+              <p style={{textAlign:"center",color:"#00E676",fontSize:12,margin:"6px 0 0",fontWeight:700}}>
+                = {fmt(toCents(inputValor))}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label style={S.rot}>Categoria</label>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {CATEGORIAS.map(c=>(
+                <button key={c} onClick={()=>setFormTx({...formTx,categoria:c,subcat:""})}
+                  style={{...S.chip(formTx.categoria===c),display:"flex",alignItems:"center",gap:5}}>
+                  {CAT_ICONES[c]} {c}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {isBar&&(
+            <div style={{...S.card,padding:16,background:"#FF8C4210",border:"1.5px solid #FF8C4230"}}>
+              <p style={{margin:"0 0 10px",fontSize:13,fontWeight:700,color:"#FF8C42"}}>🧃 Bar da Escola</p>
+              <p style={{margin:"0 0 8px",fontSize:12,color:"#888"}}>Subcategoria (opcional):</p>
+              <div style={{display:"flex",gap:8}}>
+                {BAR_SUBCATS.map(s=>(
+                  <button key={s} onClick={()=>setFormTx({...formTx,subcat:s})} style={{...S.chip(formTx.subcat===s),flex:1,textAlign:"center"}}>{s}</button>
+                ))}
+              </div>
+              <p style={{margin:"12px 0 0",fontSize:11,color:"#666"}}>Digite o valor desejado no campo acima ↑</p>
+            </div>
+          )}
+
+          <div>
+            <label style={S.rot}>Descrição {isOutros&&<span style={{color:"#ff6666"}}>*obrigatório</span>}</label>
+            <input style={S.inp} placeholder={isOutros?"Descreva este gasto...":"Para que foi esse gasto? (opcional)"} value={formTx.descricao}
+              onChange={e=>setFormTx({...formTx,descricao:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <div>
+            <label style={S.rot}>Data</label>
+            <input style={S.inp} type="date" value={formTx.data} onChange={e=>setFormTx({...formTx,data:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <button style={{...S.btn,background:formTx.tipo==="receita"?"#00E676":"#ff4455",marginTop:4}} onClick={()=>adicionarTransacao()}>
+            Salvar Transação
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  //  HISTÓRICO
+  // ══════════════════════════════════════════════════════════════
+  const renderHistorico=()=>(
+    <div style={S.tela}>
+      <div style={S.cab}>
+        <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Histórico</h2>
+        <span style={{color:"#555",fontSize:13}}>{txFiltradas.length} registros</span>
+      </div>
+      <div style={{padding:"0 20px"}}>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          {["Todos","receita","despesa"].map(t=>(
+            <button key={t} onClick={()=>setFiltroTipo(t)} style={S.chip(filtroTipo===t)}>
+              {t==="Todos"?"Todos":t==="receita"?"💰 Receitas":"💸 Despesas"}
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4,marginBottom:12}}>
+          {["Todas",...CATEGORIAS].map(c=>(
+            <button key={c} onClick={()=>setFiltroCategoria(c)} style={S.chip(filtroCategoria===c)}>{c}</button>
+          ))}
+        </div>
+        <div style={{marginBottom:12}}>
+          <input style={S.inp} type="date" value={filtroData} onChange={e=>setFiltroData(e.target.value)} onFocus={S.fi} onBlur={S.fo}/>
+        </div>
+        {filtroData&&<button onClick={()=>setFiltroData("")} style={{...S.btnG,marginBottom:12,fontSize:12}}>Limpar data ✕</button>}
+        <div style={S.card}>
+          {txFiltradas.length===0&&<p style={{color:"#444",textAlign:"center",padding:"20px 0",margin:0}}>Nenhuma transação encontrada</p>}
+          {txFiltradas.map((t,i)=>(
+            <div key={t.id}>
+              {i>0&&<div style={S.sep}/>}
+              <div style={{...S.row,padding:"10px 0"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12,flex:1,minWidth:0}}>
+                  <div style={{width:42,height:42,borderRadius:12,background:t.tipo==="receita"?"#00E67618":"#ff444518",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{CAT_ICONES[t.categoria]||"💰"}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.descricao||t.categoria||"—"}</p>
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginTop:3}}>
+                      <span style={S.badge(t.tipo)}>{t.tipo}</span>
+                      <span style={{fontSize:11,color:"#555"}}>{t.data}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                  <span style={{fontWeight:800,color:t.tipo==="receita"?"#00E676":"#ff6666",fontSize:14}}>
+                    {t.tipo==="receita"?"+":"-"}{fmt(getCents(t))}
+                  </span>
+                  <button onClick={()=>excluirTx(t.id)} style={{background:"none",border:"none",color:"#444",cursor:"pointer",fontSize:16,padding:"2px 6px",fontFamily:"inherit"}}>✕</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  ESTATÍSTICAS
+  // ══════════════════════════════════════════════════════════════
+  const renderEstatisticas=()=>(
+    <div style={S.tela}>
+      <div style={S.cab}><h2 style={{margin:0,fontSize:22,fontWeight:800}}>Estatísticas</h2></div>
+      <div style={{padding:"0 20px"}}>
+        <div style={S.card}>
+          <p style={{margin:"0 0 14px",fontWeight:700,fontSize:15}}>Receitas vs Despesas</p>
+          {[{label:"Receitas",v:receitasCents,cor:"#00E676"},{label:"Despesas",v:despesasCents,cor:"#ff4455"}].map(item=>(
+            <div key={item.label} style={{marginBottom:12}}>
+              <div style={{...S.row,marginBottom:5}}>
+                <span style={{fontSize:13,color:"#aaa"}}>{item.label}</span>
+                <span style={{fontSize:14,fontWeight:800,color:item.cor}}>{fmt(item.v)}</span>
+              </div>
+              <div style={{background:"#1e1e1e",borderRadius:6,height:8,overflow:"hidden"}}>
+                <div style={{width:`${receitasCents>0?(item.v/Math.max(receitasCents,despesasCents))*100:0}%`,height:"100%",background:item.cor,borderRadius:6,transition:"width 0.8s ease"}}/>
+              </div>
+            </div>
+          ))}
+          <div style={{...S.sep,margin:"14px 0"}}/>
+          <div style={S.row}>
+            <span style={{color:"#555",fontSize:13}}>Taxa de Poupança</span>
+            <span style={{color:saldoCents>=0?"#00E676":"#ff6666",fontWeight:800,fontSize:15}}>
+              {receitasCents>0?Math.round((saldoCents/receitasCents)*100):0}%
+            </span>
+          </div>
+        </div>
+
+        <div style={{...S.card,border:"1.5px solid #FF8C4222"}}>
+          <p style={{margin:"0 0 12px",fontWeight:700,fontSize:15}}>🧃 Bar da Escola — Mês Atual</p>
+          {gastoBarCents===0
+            ?<p style={{color:"#444",margin:0,fontSize:13}}>Sem gastos no bar este mês.</p>
+            :<>
+              <div style={{...S.row,marginBottom:8}}>
+                <span style={{fontSize:13,color:"#aaa"}}>Total</span>
+                <span style={{fontWeight:800,color:"#FF8C42",fontSize:16}}>{fmt(gastoBarCents)}</span>
+              </div>
+              {BAR_SUBCATS.map(sub=>{
+                const v=somarCents(transacoes.filter(t=>t.tipo==="despesa"&&t.categoria==="Bar da escola"&&t.subcat===sub&&isMesAtual(t)).map(getCents));
+                return v>0?(<div key={sub} style={{...S.row,marginBottom:6}}><span style={{fontSize:13,color:"#888"}}>{sub}</span><span style={{fontSize:13,fontWeight:700}}>{fmt(v)}</span></div>):null;
+              })}
+              {gastoBarCents>8000&&<div style={{background:"#FF8C4215",borderRadius:10,padding:"10px 12px",marginTop:10}}><p style={{margin:0,fontSize:12,color:"#FF8C42"}}>⚠️ Tente manter abaixo de R$80,00 por mês!</p></div>}
+            </>
+          }
+        </div>
+
+        <div style={S.card}>
+          <p style={{margin:"0 0 14px",fontWeight:700,fontSize:15}}>Gastos por Categoria</p>
+          {dadosCat.length===0
+            ?<p style={{color:"#444",textAlign:"center",padding:"14px 0",margin:0}}>Nenhuma despesa ainda</p>
+            :<>
+              <GraficoRosca segmentos={dadosCat} tamanho={150}/>
+              <div style={{marginTop:14,display:"flex",flexDirection:"column",gap:10}}>
+                {dadosCat.map(c=>(
+                  <div key={c.nome} style={S.row}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:10,height:10,borderRadius:3,background:c.cor,flexShrink:0}}/>
+                      <span style={{fontSize:13,color:"#aaa"}}>{c.nome}</span>
+                    </div>
+                    <span style={{fontSize:14,fontWeight:700}}>{fmt(c.valor)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          }
+        </div>
+        <div style={S.card}>
+          <p style={{margin:"0 0 14px",fontWeight:700,fontSize:15}}>Gastos Mensais</p>
+          <GraficoBarras data={dadosMensais} altura={100}/>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  METAS
+  // ══════════════════════════════════════════════════════════════
+  const renderMetas=()=>{
+    if(aba==="nova-meta") return(
+      <div style={S.tela}>
+        <div style={S.cab}>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>{editarMeta?"Editar Meta":"Nova Meta"}</h2>
+          <button onClick={()=>{setAba("metas");setEditarMeta(null);setFormMeta({nomeMeta:"",prazo:""});setInputAlvo("");setInputGuardado("");}}
+            style={{background:"none",border:"none",color:"#555",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Cancelar</button>
+        </div>
+        <div style={{padding:"0 20px",display:"flex",flexDirection:"column",gap:14}}>
+          <div>
+            <label style={S.rot}>Nome da Meta</label>
+            <input style={S.inp} placeholder="Ex: Notebook, Viagem, Curso..." value={formMeta.nomeMeta}
+              onChange={e=>setFormMeta({...formMeta,nomeMeta:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <div>
+            <label style={S.rot}>Valor Alvo (R$)</label>
+            <input style={S.inp} type="number" min="0" step="0.01" placeholder="0,00" value={inputAlvo}
+              onChange={e=>setInputAlvo(e.target.value)} onFocus={S.fi} onBlur={S.fo}/>
+            {inputAlvo&&toCents(inputAlvo)>0&&<p style={{color:"#00E676",fontSize:12,margin:"4px 0 0",fontWeight:700}}>= {fmt(toCents(inputAlvo))}</p>}
+          </div>
+          <div>
+            <label style={S.rot}>Valor Já Guardado (R$)</label>
+            <input style={S.inp} type="number" min="0" step="0.01" placeholder="0,00" value={inputGuardado}
+              onChange={e=>setInputGuardado(e.target.value)} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <div>
+            <label style={S.rot}>Prazo</label>
+            <input style={S.inp} type="date" value={formMeta.prazo}
+              onChange={e=>setFormMeta({...formMeta,prazo:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
+          </div>
+          <button style={S.btn} onClick={salvarMeta}>{editarMeta?"Atualizar Meta":"Criar Meta"}</button>
+        </div>
+      </div>
+    );
+    return(
+      <div style={S.tela}>
+        <div style={S.cab}>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Metas de Poupança</h2>
+          <button onClick={()=>setAba("nova-meta")} style={S.btnSm}>+ Nova</button>
+        </div>
+        <div style={{padding:"0 20px"}}>
+          {metas.length===0&&(
+            <div style={{...S.card,textAlign:"center",padding:"40px 20px"}}>
+              <div style={{fontSize:48,marginBottom:12}}>🎯</div>
+              <p style={{color:"#555",margin:"0 0 16px",fontSize:14}}>Defina sua primeira meta e acompanhe o progresso!</p>
+              <button onClick={()=>setAba("nova-meta")} style={S.btn}>Criar uma Meta</button>
+            </div>
+          )}
+          {metas.map(m=>{
+            const alvoCents=m.valorAlvoCents||toCents(m.valorAlvo);
+            const guardadoCents=m.valorGuardadoCents||toCents(m.valorGuardado);
+            const pct=alvoCents>0?guardadoCents/alvoCents:0;
+            const dias=m.prazo?Math.ceil((new Date(m.prazo+"T00:00:00")-new Date())/86400000):null;
+            return(
+              <div key={m.id} style={S.card}>
+                <div style={S.row}>
+                  <div style={{flex:1}}>
+                    <p style={{margin:0,fontWeight:800,fontSize:17}}>{m.nomeMeta}</p>
+                    {m.prazo&&<p style={{margin:"4px 0 0",fontSize:12,color:dias!==null&&dias<=30?"#FF8C42":"#555"}}>{dias!==null&&dias>0?`${dias} dias restantes`:"Prazo encerrado"}</p>}
+                  </div>
+                  <Anel pct={pct} tam={64}/>
+                </div>
+                <div style={{margin:"12px 0 8px"}}>
+                  <div style={{background:"#0e0e0e",borderRadius:8,height:10,overflow:"hidden"}}>
+                    <div style={{width:`${Math.min(pct*100,100)}%`,height:"100%",background:"linear-gradient(90deg,#00E676,#69F0AE)",borderRadius:8,transition:"width 0.8s ease"}}/>
+                  </div>
+                </div>
+                <div style={S.row}>
+                  <span style={{color:"#00E676",fontWeight:700,fontSize:14}}>{fmt(guardadoCents)} guardado</span>
+                  <span style={{color:"#555",fontSize:13}}>de {fmt(alvoCents)}</span>
+                </div>
+                <div style={{display:"flex",gap:8,marginTop:14}}>
+                  <button onClick={()=>{setEditarMeta(m);setFormMeta({nomeMeta:m.nomeMeta,prazo:m.prazo||""});setInputAlvo(fmtInput(alvoCents));setInputGuardado(fmtInput(guardadoCents));setAba("nova-meta");}}
+                    style={{...S.btnG,flex:1,fontSize:13}}>Editar</button>
+                  <button onClick={()=>excluirMeta(m.id)}
+                    style={{background:"#ff445515",border:"1.5px solid #ff444530",borderRadius:10,padding:"8px 16px",color:"#ff6666",fontSize:13,fontWeight:600,cursor:"pointer",flex:1,fontFamily:"inherit"}}>Excluir</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  //  ATLAS IA
+  // ══════════════════════════════════════════════════════════════
+  const renderAtlasIA=()=>(
+    <div style={{...S.tela,display:"flex",flexDirection:"column",height:"100vh",paddingBottom:0}}>
+      <div style={S.cab}>
+        <div>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Atlas IA</h2>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3}}>
+            <div style={{width:7,height:7,borderRadius:"50%",background:fonteIA==="claude"?"#00E676":"#FFB347",flexShrink:0}}/>
+            <p style={{margin:0,fontSize:11,color:"#555"}}>
+              {fonteIA==="claude"?"Conectado ao Claude AI":"Modo offline — respostas locais"}
+            </p>
+          </div>
+        </div>
+        <div style={{width:40,height:40,borderRadius:12,background:"linear-gradient(135deg,#00E676,#00C853)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🤖</div>
+      </div>
+
+      {perfil&&(
+        <div style={{margin:"0 20px 12px",background:`${perfil.cor}15`,border:`1px solid ${perfil.cor}33`,borderRadius:14,padding:"10px 14px"}}>
+          <p style={{margin:0,fontSize:12,color:perfil.cor,fontWeight:700}}>{perfil.emoji} Perfil: {perfil.tipo}</p>
+          <p style={{margin:"3px 0 0",fontSize:11,color:"#666"}}>{perfil.desc}</p>
+        </div>
+      )}
+
+      <div ref={chatRef} style={{flex:1,overflowY:"auto",padding:"0 20px 12px",display:"flex",flexDirection:"column",gap:12}}>
+        {chatIA.length===0&&(
+          <div style={{textAlign:"center",padding:"24px 0"}}>
+            <div style={{fontSize:44,marginBottom:10}}>💬</div>
+            <p style={{color:"#555",fontSize:14,margin:"0 0 18px"}}>Pergunte qualquer coisa sobre suas finanças</p>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:"center"}}>
+              {["Qual meu saldo?","Gastos do bar","Dica de economia","Meu perfil","Resumo do mês","Maior gasto"].map(s=>(
+                <button key={s} onClick={()=>{setMsgIA(s);setTimeout(()=>{
+                  const txt=document.createElement("input");
+                  txt.value=s;
+                  const ev=new Event("click");
+                  // Trigger send directly
+                  const novaMsgUser={role:"user",texto:s,id:Date.now()};
+                  setChatIA(prev=>[...prev,novaMsgUser]);
+                  setDigIA(true);
+                  chamarClaudeAPI(s,[novaMsgUser],transacoes,perfil).then(({texto,fonte})=>{
+                    setChatIA(prev=>[...prev,{role:"ia",texto,id:Date.now()+1,fonte}]);
+                    setFonteIA(fonte); setDigIA(false);
+                  }).catch(()=>{
+                    const fb=respostaLocal(s,transacoes,perfil);
+                    setChatIA(prev=>[...prev,{role:"ia",texto:fb,id:Date.now()+1,fonte:"local"}]);
+                    setFonteIA("local"); setDigIA(false);
+                  });
+                },0);}} style={{...S.chip(false),fontSize:12}}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {chatIA.map(m=>(
+          <div key={m.id} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+            {m.role==="ia"&&<div style={{width:30,height:30,borderRadius:10,background:"#00E67622",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,marginRight:8,alignSelf:"flex-end"}}>🤖</div>}
+            <div style={{maxWidth:"82%"}}>
+              <div style={{background:m.role==="user"?"#00E676":"#1e1e1e",borderRadius:m.role==="user"?"18px 18px 4px 18px":"18px 18px 18px 4px",padding:"12px 16px",color:m.role==="user"?"#000":"#e0e0e0"}}>
+                {m.role==="ia"?<TextoIA texto={m.texto}/>:<span style={{fontSize:14}}>{m.texto}</span>}
+              </div>
+              {m.role==="ia"&&m.fonte&&(
+                <p style={{margin:"4px 0 0 4px",fontSize:10,color:"#333"}}>
+                  {m.fonte==="claude"?"🟢 Claude AI":"🟡 offline"}
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {digIA&&(
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{width:30,height:30,borderRadius:10,background:"#00E67622",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>🤖</div>
+            <div style={{background:"#1e1e1e",borderRadius:"18px 18px 18px 4px",padding:"12px 16px"}}>
+              <span style={{color:"#555",fontSize:14}}>Analisando seus dados...</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{padding:"12px 20px 96px",borderTop:"1px solid #1e1e1e",background:"#121212"}}>
+        <div style={{display:"flex",gap:8}}>
+          <input style={{...S.inp,flex:1,padding:"13px 16px"}} placeholder="Pergunte sobre seus gastos..."
+            value={msgIA} onChange={e=>setMsgIA(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!digIA){e.preventDefault();enviarMsgIA();}}}
+            onFocus={S.fi} onBlur={S.fo}/>
+          <button onClick={enviarMsgIA} disabled={digIA}
+            style={{background:digIA?"#1a1a1a":"#00E676",border:"none",borderRadius:14,padding:"0 18px",color:digIA?"#444":"#000",fontSize:20,cursor:digIA?"not-allowed":"pointer",fontFamily:"inherit",flexShrink:0,transition:"all 0.2s"}}>
+            ➤
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  NAVEGAÇÃO
+  // ══════════════════════════════════════════════════════════════
+  const NAV=[
+    {id:"painel",       icone:"◉",  rot:"Início"},
+    {id:"historico",    icone:"⊟",  rot:"Histórico"},
+    {id:"adicionar",    icone:"⊕",  rot:"Adicionar"},
+    {id:"estatisticas", icone:"◈",  rot:"Gráficos"},
+    {id:"metas",        icone:"◎",  rot:"Metas"},
+    {id:"atlas-ia",     icone:"🤖", rot:"Atlas IA"},
+  ];
+
+  return(
+    <div style={S.app}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
+      {aviso&&<div style={S.toast(aviso.ok)}>{aviso.msg}</div>}
+      <div style={{overflowY:"auto",height:"100vh"}}>
+        {aba==="painel"       &&renderPainel()}
+        {aba==="adicionar"    &&renderAdicionar()}
+        {aba==="historico"    &&renderHistorico()}
+        {aba==="estatisticas" &&renderEstatisticas()}
+        {(aba==="metas"||aba==="nova-meta")&&renderMetas()}
+        {aba==="atlas-ia"     &&renderAtlasIA()}
+      </div>
+      <nav style={S.nav}>
+        {NAV.map(n=>(
+          <button key={n.id} onClick={()=>setAba(n.id)}
+            style={S.navB(aba===n.id||(aba==="nova-meta"&&n.id==="metas"))}>
+            <span style={{fontSize:n.id==="adicionar"?24:n.id==="atlas-ia"?15:18,lineHeight:1}}>{n.icone}</span>
+            <span style={{fontSize:9,fontWeight:700,letterSpacing:0.2}}>{n.rot}</span>
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
