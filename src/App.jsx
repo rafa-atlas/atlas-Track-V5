@@ -6,7 +6,10 @@ import { createClient } from "@supabase/supabase-js";
 // ════════════════════════════════════════════════════════════════
 const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = (SUPA_URL && SUPA_KEY) ? createClient(SUPA_URL, SUPA_KEY) : null;
+let supabase = null;
+try {
+  if (SUPA_URL && SUPA_KEY) supabase = createClient(SUPA_URL, SUPA_KEY);
+} catch(e) { console.warn("Supabase init error:", e); }
 
 
 // ════════════════════════════════════════════════════════════════
