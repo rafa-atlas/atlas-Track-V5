@@ -88,7 +88,7 @@ const DB = {
   get:(k)   =>{ try{return JSON.parse(localStorage.getItem("atv3_"+k)||"null");}catch{return null;} },
   set:(k,v) =>{ try{localStorage.setItem("atv3_"+k,JSON.stringify(v));}catch{} },
   del:(k)   =>{ try{localStorage.removeItem("atv3_"+k);}catch{} },
-  uid:()    =>"_"+Math.random().toString(36).slice(2)+Date.now(),
+  uid:()    =>{ const s=()=>Math.random().toString(16).slice(2); return `${s().slice(0,8)}-${s().slice(0,4)}-4${s().slice(0,3)}-${(Math.floor(Math.random()*4)+8).toString(16)}${s().slice(0,3)}-${s().slice(0,12)}`; },
   usuarios:   ()=>DB.get("usuarios")  ||[],
   transacoes: ()=>DB.get("transacoes")||[],
   metas:      ()=>DB.get("metas")     ||[],
