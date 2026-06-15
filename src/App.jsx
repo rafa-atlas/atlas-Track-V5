@@ -1,4 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+// ════════════════════════════════════════════════════════════════
+//  🌐 SUPABASE CLIENT
+// ════════════════════════════════════════════════════════════════
+const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = (SUPA_URL && SUPA_KEY) ? createClient(SUPA_URL, SUPA_KEY) : null;
+
 
 // ════════════════════════════════════════════════════════════════
 //  💰 DINHEIRO — Armazenado em centavos (inteiros) para precisão
@@ -302,7 +311,7 @@ INSTRUÇÕES:
 }
 
 // ════════════════════════════════════════════════════════════════
-//  🔄 FALLBACK — Respostas locais quando API está indisponível
+//  🔄 ATLAS IA — Respostas inteligentes baseadas nos dados reais
 // ════════════════════════════════════════════════════════════════
 function respostaLocal(mensagem, transacoes, perfil) {
   const msg=mensagem.toLowerCase().trim();
@@ -312,65 +321,202 @@ function respostaLocal(mensagem, transacoes, perfil) {
     if(t.tipo!=="despesa") return false;
     try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
   });
+  const recMes=transacoes.filter(t=>{
+    if(t.tipo!=="receita") return false;
+    try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAtual&&d.getFullYear()===anoAtual;}catch{return false;}
+  });
 
-  const recCents  = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
-  const despCents = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
-  const saldoCents= recCents - despCents;
-  const despMesCents=somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+  const recCents    = somarCents(transacoes.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
+  const despCents   = somarCents(transacoes.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
+  const saldoCents  = recCents - despCents;
+  const despMesCents= somarCents(despMes.map(t=>t.amountCents||toCents(t.amount)));
+  const recMesCents = somarCents(recMes.map(t=>t.amountCents||toCents(t.amount)));
 
   const gastoCat=(cat)=>somarCents(despMes.filter(t=>t.categoria===cat).map(t=>t.amountCents||toCents(t.amount)));
   const topCat=CATEGORIAS.map(c=>({nome:c,cents:gastoCat(c)})).sort((a,b)=>b.cents-a.cents).filter(c=>c.cents>0);
   const perfilTipo=perfil?.tipo||"Equilibrado";
 
-  if(/(saldo|quanto.*(tenho|sobrou|resta)|dinheiro)/.test(msg)||msg==="saldo"){
-    return saldoCents>=0
-      ?`💚 Seu saldo atual é **${fmtSaldo(saldoCents)}**. Ótimo — receitas superam despesas! Continue registrando tudo.`
-      :`🔴 Seu saldo está **${fmtSaldo(saldoCents)}**. Hora de revisar gastos urgentemente!`;
+  // Calcular gasto diário médio
+  const diaDoMes=agora.getDate();
+  const gastoDiario=diaDoMes>0?Math.round(despMesCents/diaDoMes):0;
+  const diasNoMes=new Date(anoAtual,mesAtual+1,0).getDate();
+  const diasRestantes=diasNoMes-diaDoMes;
+
+  // ── SAUDAÇÕES ──────────────────────────────────────────────
+  if(/(^(olá|oi|ola|hey|e aí|eai|hello|hi)$|bom dia|boa tarde|boa noite|tudo bem|tudo bom|como vai)/.test(msg)){
+    const hora=agora.getHours();
+    const saudacao=hora<12?"Bom dia":hora<18?"Boa tarde":"Boa noite";
+    return `👋 ${saudacao}! Sou o **Atlas IA**, seu assistente financeiro pessoal.\n\nEstou aqui para te ajudar a entender seus gastos e tomar melhores decisões com o dinheiro. O que quer saber?\n\n💡 Pode me perguntar sobre: saldo, gastos do mês, bar da escola, metas, dicas de economia e seu perfil financeiro.`;
   }
-  if(/(resumo|análise|balanço|como.*estou|situação)/.test(msg)){
+
+  // ── SALDO ──────────────────────────────────────────────────
+  if(/(saldo|quanto.*(tenho|sobrou|resta|tenho disponível)|meu dinheiro|dinheiro disponível)/.test(msg)){
+    if(transacoes.length===0) return `💰 Você ainda não registrou nenhuma transação. Adicione suas receitas e despesas para eu calcular seu saldo!`;
     const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
-    return `📊 **Resumo:**\n• Receitas: ${fmt(recCents)}\n• Despesas: ${fmt(despCents)}\n• Saldo: ${fmtSaldo(saldoCents)}\n• Poupança: ${taxa}%\n\nPerfil: **${perfilTipo}** — ${perfil?.desc||"continue acompanhando!"}`;
+    if(saldoCents>=0)
+      return `💚 Seu saldo atual é **${fmtSaldo(saldoCents)}**.\n\n• Receitas totais: ${fmt(recCents)}\n• Despesas totais: ${fmt(despCents)}\n• Taxa de poupança: ${taxa}%\n\n${taxa>=20?"🏆 Excelente! Você está poupando bem.":taxa>=10?"✅ Bom controle! Tente chegar em 20% de poupança.":"⚠️ Tente guardar pelo menos 20% do que recebe."}`;
+    return `🔴 Seu saldo está **${fmtSaldo(saldoCents)}** (negativo).\n\nVocê gastou ${fmt(Math.abs(saldoCents))} a mais do que recebeu. Evite novos gastos e tente quitar essa diferença o quanto antes!`;
   }
-  if(/(bar|cantina|lanche|salgado|doce|bebida)/.test(msg)){
-    const b=gastoCat("Bar da escola");
-    return b===0?`🧃 Sem gastos no **Bar da escola** este mês.`
-      :`🧃 Você gastou **${fmt(b)}** no bar este mês. ${b>8000?"⚠️ Está alto! Tente ficar abaixo de R$80,00.":"Está controlado!"}`;
+
+  // ── SALDO SAUDÁVEL ─────────────────────────────────────────
+  if(/(saldo.*(saudável|bom|ok|positivo)|financeiramente.*bem|indo bem|estou bem)/.test(msg)){
+    if(saldoCents<0) return `🔴 Não está muito bem não. Seu saldo está **${fmtSaldo(saldoCents)}** — você gastou mais do que recebeu. Hora de agir!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    if(taxa>=20) return `💎 Sim! Seu saldo está **${fmtSaldo(saldoCents)}** e você está poupando **${taxa}%** da sua renda. Isso é excelente para um estudante!`;
+    if(taxa>=5)  return `✅ Razoável! Saldo de **${fmtSaldo(saldoCents)}** com **${taxa}%** de poupança. Você pode melhorar chegando a 20%!`;
+    return `⚠️ Seu saldo é positivo (**${fmtSaldo(saldoCents)}**), mas a margem é pequena. Tente cortar alguns gastos para ter mais segurança.`;
   }
-  if(/(alimenta|comida|almoço|restaurante)/.test(msg)){
-    const g=gastoCat("Alimentação");
-    return g===0?`🍔 Sem gastos com Alimentação este mês.`
-      :`🍔 **Alimentação:** ${fmt(g)} este mês. ${g>30000?"⚠️ Considere trazer marmita!":"✅ Dentro do limite."}`;
+
+  // ── RESUMO / ANÁLISE ───────────────────────────────────────
+  if(/(resumo|análise|analis|balanço|balanco|situação|situacao|como estou|minha situação)/.test(msg)){
+    if(transacoes.length===0) return `📊 Ainda não tenho dados para analisar. Registre suas receitas e despesas primeiro!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    const top=topCat[0];
+    return `📊 **Resumo financeiro:**\n\n• Receitas: ${fmt(recCents)}\n• Despesas: ${fmt(despCents)}\n• Saldo: **${fmtSaldo(saldoCents)}**\n• Poupança: ${taxa}%\n${top?`• Maior gasto: ${top.nome} (${fmt(top.cents)})`:""  }\n\nPerfil: **${perfil?.emoji||""} ${perfilTipo}**\n${perfil?.desc||""}`;
   }
-  if(/(dica|econom|poupar|guardar|economizar)/.test(msg)){
+
+  // ── GASTANDO MUITO ─────────────────────────────────────────
+  if(/(gastando muito|gasto.*alto|gasto.*demais|gasto excessivo|preciso cortar|to gastando)/.test(msg)){
+    if(despMes.length===0) return `📅 Sem despesas registradas este mês — você está ótimo! Continue registrando tudo.`;
+    const taxa=recMesCents>0?Math.round((despMesCents/recMesCents)*100):100;
+    if(taxa>80) return `⚠️ Sim, você está gastando muito! **${taxa}%** da sua receita do mês já foi em despesas.\n\nMaiores gastos:\n${topCat.slice(0,3).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}\n\nFoco: corte os gastos não essenciais primeiro.`;
+    if(taxa>50) return `⚡ Atenção! Você já usou **${taxa}%** da sua receita este mês. Ainda dá pra controlar — evite gastos por impulso nos próximos dias.`;
+    return `✅ Não! Você gastou **${taxa}%** da sua receita este mês, o que é razoável. Continue monitorando!`;
+  }
+
+  // ── CONTROLE DE GASTOS ─────────────────────────────────────
+  if(/(controlar.*gasto|como.*controlar|como.*organizar|organizar.*financ|controle financeiro)/.test(msg)){
+    return `🎯 **Como controlar seus gastos:**\n\n1. **Registre tudo** — até o menor gasto. O AtlasTrack foi feito pra isso!\n2. **Defina um limite** por categoria todo mês\n3. **Revise semanalmente** — veja onde está gastando mais\n4. **Crie metas** — ter um objetivo te motiva a economizar\n5. **Espere 24h** antes de qualquer compra por impulso\n\nO simples ato de registrar já muda o comportamento! 💪`;
+  }
+
+  // ── QUANTO POSSO GASTAR POR DIA ────────────────────────────
+  if(/(quanto.*gastar.*dia|gasto.*diário|gasto diario|por dia|limite.*diário)/.test(msg)){
+    if(saldoCents<=0) return `🔴 Seu saldo está negativo — evite qualquer gasto até equilibrar as contas!`;
+    if(diasRestantes<=0) return `📅 Último dia do mês! Seu saldo disponível é **${fmt(saldoCents)}**.`;
+    const porDia=Math.floor(saldoCents/diasRestantes);
+    return `📅 Com seu saldo de **${fmt(saldoCents)}** e **${diasRestantes} dias** restantes no mês, você pode gastar até **${fmt(porDia)} por dia** sem entrar no negativo.\n\n💡 Mas tente guardar parte disso para o próximo mês!`;
+  }
+
+  // ── ECONOMIZAR / DICAS ─────────────────────────────────────
+  if(/(como.*economizar|dica.*econom|econom|poupar|guardar dinheiro|gastar menos|cortar gasto)/.test(msg)){
     const dicas=[
-      "💡 **Regra 50/30/20:** 50% necessidades, 30% desejos, 20% poupança.",
-      "💡 Espere **48h** antes de qualquer compra por impulso. Você ainda vai querer?",
-      "💡 Registre **todos os gastos**, até o menor. A consciência muda o comportamento!",
-      "💡 Crie uma **meta mensal de poupança** — mesmo R$50,00 faz diferença no hábito.",
-      "💡 Compare preços antes de comprar. Pequenas diferenças acumulam muito ao longo do ano.",
+      `💡 **Regra 50/30/20:** Divida sua renda em 50% necessidades, 30% desejos e 20% poupança. Simples e eficaz!`,
+      `💡 **Espere 48h** antes de qualquer compra por impulso. Se depois de 2 dias você ainda quiser, aí compra.`,
+      `💡 **Registre tudo no AtlasTrack** — até o cafezinho. Quem registra gasta menos, porque fica consciente!`,
+      `💡 **Leve lanche de casa** em vez de comprar no bar da escola todo dia. Pode economizar mais de R$100 por mês!`,
+      `💡 **Defina um limite mensal** para lazer e entretenimento e respeite ele. Diversão com controle!`,
+      `💡 **Crie uma meta financeira** — ter um objetivo concreto (headphone, viagem, etc.) motiva muito mais a economizar.`,
+      `💡 **Evite parcelamentos** — o "cabe no bolso" engana. Pague à vista ou não compre.`,
     ];
     return dicas[Math.floor(Math.random()*dicas.length)];
   }
-  if(/(maior.*gasto|onde.*gast|categoria)/.test(msg)){
-    return topCat.length===0?`📂 Sem despesas registradas este mês.`
-      :`📂 Maior gasto: **${topCat[0].nome}** com **${fmt(topCat[0].cents)}**. ${topCat[0].cents>20000?"Atenção — está pesando no orçamento!":"Ainda aceitável."}`;
+
+  // ── ECONOMIZAR SENDO ESTUDANTE ─────────────────────────────
+  if(/(estudante|sendo jovem|sendo estudante|jovem.*economizar|econom.*jovem)/.test(msg)){
+    return `🎒 **Dicas para estudantes economizarem:**\n\n1. **Lanche de casa** — o bar da escola é conveniente mas caro\n2. **Carona e transporte coletivo** — evite aplicativos de corrida no dia a dia\n3. **Material escolar usado** — livros e materiais de colegas mais velhos\n4. **Meia-entrada** — use sempre que disponível em shows e cinemas\n5. **Trabalhe com o que tem** — pequenos bicos, venda de itens, freelance\n6. **Aproveite o que a escola oferece** — biblioteca, internet, impressão\n\nComeçar cedo a cuidar do dinheiro é o maior presente que você pode se dar! 💎`;
   }
-  if(/(perfil|meu.*tipo|como.*classificado)/.test(msg)){
-    return perfil
-      ?`🧠 Perfil: **${perfil.emoji} ${perfil.tipo}**\n\n${perfil.desc}`
-      :`🧠 Você ainda não fez o questionário de perfil. Vai aparecer na próxima vez que você abrir o app!`;
+
+  // ── COMPRAS IMPULSIVAS ─────────────────────────────────────
+  if(/(impulso|impulsiv|compra.*impulso|evitar.*compra|resistir|tentação)/.test(msg)){
+    return `🛑 **Como evitar compras por impulso:**\n\n• **Regra das 48h** — espere 2 dias antes de comprar qualquer coisa não planejada\n• **Saia sem cartão** — leve só o dinheiro que vai precisar\n• **Pergunte-se:** "Preciso disso ou só quero?"\n• **Pense no custo real** — quantas horas de mesada/trabalho isso representa?\n• **Delete apps de loja** do celular — menos tentação, menos gasto\n• **Tenha uma meta** — lembrar do objetivo te dá força para resistir\n\nO autocontrole financeiro é um músculo — quanto mais você exercita, mais forte fica! 💪`;
   }
-  if(/(mês|mensal|este.*mes|esse.*mes)/.test(msg)){
-    return despMes.length===0?`📅 Sem despesas este mês ainda.`
-      :`📅 **Este mês:** ${fmt(despMesCents)} em ${despMes.length} transações.\n${topCat.slice(0,2).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}`;
+
+  // ── BAR DA ESCOLA ──────────────────────────────────────────
+  if(/(bar|cantina|bar da escola|lanche.*escola|escola.*lanche)/.test(msg)){
+    const b=gastoCat("Bar da escola");
+    const txBar=despMesCents>0?Math.round((b/despMesCents)*100):0;
+    if(b===0) return `🧃 Você não tem gastos registrados no **Bar da escola** este mês. Ótimo controle!`;
+    const status=b>8000?"⚠️ Está alto! Tente ficar abaixo de R$80,00 por mês.":b>4000?"⚡ Moderado. Tente reduzir um pouco.":"✅ Controlado! Bom trabalho.";
+    return `🧃 **Bar da escola este mês:**\n\n• Total gasto: **${fmt(b)}**\n• % das despesas: ${txBar}%\n• Status: ${status}\n\n💡 Levar lanche de casa alguns dias pode economizar bastante no mês!`;
   }
-  if(/(olá|oi|ola|hey|bom dia|boa tarde|tudo bem)/.test(msg)){
-    return `👋 Olá! Sou o **Atlas IA**.\n\nPosso analisar: saldo, gastos do mês, bar da escola, categorias, perfil e dicas. O que quer saber?`;
+
+  // ── GASTAR MENOS NO BAR ────────────────────────────────────
+  if(/(menos.*bar|bar.*menos|reduzir.*bar|cortar.*bar|bar.*caro)/.test(msg)){
+    const b=gastoCat("Bar da escola");
+    return `🧃 ${b>0?`Você gastou **${fmt(b)}** no bar este mês. `:""}**Dicas para gastar menos no bar:**\n\n1. Leve água e um lanche de casa\n2. Defina um limite semanal (ex: R$20)\n3. Evite comprar por impulso quando estiver com fome\n4. Compare: R$5 por dia = R$100 por mês = R$1.200 por ano!\n\nPequenas mudanças geram grandes economias! 💰`;
   }
+
+  // ── MAIOR GASTO ────────────────────────────────────────────
+  if(/(maior.*gasto|gasto.*maior|gasto.*mais caro|mais caro|maior.*despesa)/.test(msg)){
+    const todas=transacoes.filter(t=>t.tipo==="despesa").sort((a,b)=>(b.amountCents||toCents(b.amount))-(a.amountCents||toCents(a.amount)));
+    if(todas.length===0) return `📊 Nenhuma despesa registrada ainda.`;
+    const maior=todas[0];
+    return `💸 Seu maior gasto foi **${fmt(maior.amountCents||toCents(maior.amount))}** em **${maior.categoria}**${maior.descricao?` (${maior.descricao})`:""}  no dia ${maior.data}.`;
+  }
+
+  // ── CATEGORIA QUE MAIS GASTA ───────────────────────────────
+  if(/(categoria|mais.*gast|onde.*gast|mais.*caro)/.test(msg)){
+    if(topCat.length===0) return `📂 Sem despesas registradas este mês ainda.`;
+    return `📂 **Suas maiores categorias de gasto este mês:**\n\n${topCat.slice(0,4).map((c,i)=>`${i===0?"🥇":i===1?"🥈":i===2?"🥉":"  4."} ${c.nome}: **${fmt(c.cents)}**`).join("\n")}\n\n${topCat[0].cents>20000?`⚠️ **${topCat[0].nome}** está pesando bastante. Vale a pena revisar esses gastos!`:`✅ Seus gastos estão bem distribuídos.`}`;
+  }
+
+  // ── QUANTO GASTEI NO MÊS ───────────────────────────────────
+  if(/(quanto.*gastei|gasto.*mês|gasto.*mes|este mês|esse mês|mensal|mês atual)/.test(msg)){
+    if(despMes.length===0) return `📅 Nenhuma despesa registrada este mês ainda. Continue registrando tudo!`;
+    return `📅 **Gastos de ${MESES[mesAtual]}:**\n\n• Total: **${fmt(despMesCents)}**\n• Transações: ${despMes.length}\n• Média diária: ${fmt(gastoDiario)}\n${topCat.length>0?`\nMaiores gastos:\n${topCat.slice(0,3).map(c=>`• ${c.nome}: ${fmt(c.cents)}`).join("\n")}`:""}`;
+  }
+
+  // ── QUANTO ECONOMIZEI ──────────────────────────────────────
+  if(/(economi[sz]ei|quanto.*guard|poupança|quanto.*sobrou|sobra)/.test(msg)){
+    if(recCents===0) return `💰 Adicione suas receitas primeiro para eu calcular quanto você economizou!`;
+    const taxa=recCents>0?Math.round((saldoCents/recCents)*100):0;
+    if(saldoCents<=0) return `😟 Este mês você não economizou — as despesas superaram as receitas em **${fmt(Math.abs(saldoCents))}**. Tente reduzir os gastos!`;
+    return `💚 Você economizou **${fmt(saldoCents)}** — isso representa **${taxa}%** da sua receita.\n\n${taxa>=20?"🏆 Parabéns! Isso é excelente.":taxa>=10?"✅ Bom resultado! Tente chegar em 20%.":"💪 É um começo! Tente aumentar essa porcentagem."}`;
+  }
+
+
+
+  // ── GASTO AUMENTOU OU DIMINUIU ─────────────────────────────
+  if(/(aumentou|diminuiu|comparado|mês passado|mes passado|evolução|evolucao|tendência)/.test(msg)){
+    const mesAnt=mesAtual===0?11:mesAtual-1;
+    const anoAnt=mesAtual===0?anoAtual-1:anoAtual;
+    const despAnt=somarCents(transacoes.filter(t=>{
+      if(t.tipo!=="despesa") return false;
+      try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mesAnt&&d.getFullYear()===anoAnt;}catch{return false;}
+    }).map(t=>t.amountCents||toCents(t.amount)));
+    if(despAnt===0) return `📈 Não tenho dados do mês passado para comparar. Continue registrando e em breve terei!`;
+    const diff=despMesCents-despAnt;
+    const pct=Math.round((Math.abs(diff)/despAnt)*100);
+    if(diff>0) return `📈 Seus gastos **aumentaram ${pct}%** em relação ao mês passado.\n\n• Mês passado: ${fmt(despAnt)}\n• Este mês: ${fmt(despMesCents)}\n• Diferença: +${fmt(diff)}\n\n⚠️ Fique atento para não continuar essa tendência!`;
+    if(diff<0) return `📉 Seus gastos **diminuíram ${pct}%** em relação ao mês passado!\n\n• Mês passado: ${fmt(despAnt)}\n• Este mês: ${fmt(despMesCents)}\n• Economia: ${fmt(Math.abs(diff))}\n\n🎉 Parabéns! Continue assim!`;
+    return `📊 Seus gastos estão **iguais** ao mês passado: ${fmt(despMesCents)}. Tente reduzir!`;
+  }
+
+  // ── PERFIL FINANCEIRO ──────────────────────────────────────
+  if(/(perfil|meu.*tipo|tipo.*financeiro|como.*classificado|sou gastador|sou econômico)/.test(msg)){
+    if(!perfil) return `🧠 Você ainda não fez o questionário de perfil financeiro. Ele aparecerá automaticamente na próxima vez que você abrir o app!`;
+    return `🧠 **Seu perfil financeiro:**\n\n${perfil.emoji} **${perfil.tipo}**\n\n${perfil.desc}\n\n💡 O questionário se repete a cada 30 dias para acompanhar sua evolução!`;
+  }
+
+  // ── O QUE SIGNIFICA CADA PERFIL ────────────────────────────
+  if(/(o que.*significa|significa.*perfil|econômico.*significa|gastador.*significa|equilibrado.*significa)/.test(msg)){
+    return `🧠 **Os 3 perfis financeiros:**\n\n🔥 **Gastador** — Tende a gastar sem planejar. Precisa de mais controle e disciplina.\n\n⚖️ **Equilibrado** — Tem bom controle mas ainda comete excessos às vezes.\n\n💎 **Econômico** — Excelente disciplina financeira. Planeja, poupa e controla bem.\n\nO objetivo é evoluir para **Econômico** com o tempo!`;
+  }
+
+  // ── MELHORAR PERFIL ────────────────────────────────────────
+  if(/(melhorar.*perfil|virar.*econômico|ser.*econômico|mudar.*perfil|como melhorar)/.test(msg)){
+    return `💎 **Como melhorar seu perfil financeiro:**\n\n1. **Registre tudo** — consciência é o primeiro passo\n2. **Defina limites** por categoria todo mês\n3. **Poupe antes de gastar** — separe 20% assim que receber\n4. **Evite parcelamentos** — eles escondem o real valor gasto\n5. **Revise suas metas** semanalmente\n6. **Refaça o questionário** em 30 dias para ver sua evolução\n\nMudança de hábito leva tempo, mas vale a pena! 💪`;
+  }
+
+  // ── METAS ──────────────────────────────────────────────────
+  if(/(meta|objetivo|sonho|quanto falta|perto.*meta|meta.*perto|atingir.*meta)/.test(msg)){
+    if(transacoes.length===0) return `🎯 Crie suas metas na aba **Metas** do app! Ter um objetivo concreto te motiva muito mais a economizar.`;
+    return `🎯 Acesse a aba **Metas** para ver o progresso detalhado de cada objetivo.\n\n💡 Dica: divida o valor que falta pelos dias até o prazo para saber quanto guardar por dia!`;
+  }
+
+  // ── QUANTO GUARDAR POR SEMANA ──────────────────────────────
+  if(/(quanto.*guardar|guardar.*semana|guardar.*dia|poupar.*semana|poupar.*dia)/.test(msg)){
+    if(saldoCents<=0) return `😟 Seu saldo está negativo — primeiro equilibre as contas antes de pensar em poupar!`;
+    const porSemana=Math.floor(saldoCents/4);
+    const porDia2=Math.floor(saldoCents/30);
+    return `💰 Com seu saldo atual de **${fmt(saldoCents)}**, você poderia guardar:\n\n• **${fmt(porDia2)} por dia**\n• **${fmt(porSemana)} por semana**\n\nO ideal é guardar pelo menos 20% da sua renda mensal assim que receber!`;
+  }
+
+  // ── SAUDAÇÃO FINAL / NÃO ENTENDEU ─────────────────────────
   if(topCat.length>0){
-    return `🤔 Não entendi, mas: seu maior gasto este mês é **${topCat[0].nome}** (${fmt(topCat[0].cents)}). Tente perguntar sobre "saldo", "resumo", "dicas" ou "bar da escola".`;
+    return `🤖 Não entendi bem a pergunta, mas posso te ajudar com:\n\n• **Saldo** — quanto você tem disponível\n• **Gastos do mês** — quanto gastou em ${MESES[mesAtual]}\n• **Bar da escola** — seus gastos lá\n• **Dicas** — como economizar mais\n• **Perfil** — seu tipo financeiro\n• **Metas** — progresso dos seus objetivos\n\nSeu maior gasto este mês é **${topCat[0].nome}** (${fmt(topCat[0].cents)}). Quer saber mais sobre isso?`;
   }
-  return `🤔 Tente perguntar sobre: **saldo**, **resumo**, **dicas de economia**, **bar da escola** ou **meu perfil**.`;
+  return `🤖 Olá! Sou o **Atlas IA**. Ainda não tenho seus dados financeiros para analisar.\n\nComece adicionando suas receitas e despesas e depois volte aqui — terei muito mais para te contar! 😊`;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -552,31 +698,67 @@ export default function AtlasTrack(){
   const [fonteIA,setFonteIA]=useState("claude"); // "claude" | "local"
   const chatRef=useRef(null);
 
+  // Tour de apresentação
+  const [tourAtivo,  setTourAtivo]  =useState(false);
+  const [tourEtapa,  setTourEtapa]  =useState(0);
+  const [tourNovoReg,setTourNovoReg]=useState(false); // flag para disparar tour pós-cadastro
+
   const mostrarAviso=(msg,ok=true)=>{setAviso({msg,ok});setTimeout(()=>setAviso(null),2800);};
 
-  const carregarDados=useCallback((uid)=>{
+  const carregarDados=useCallback(async(uid)=>{
     try{
-      const txs  = DB.txDoUsuario(uid);
-      const mts  = DB.metasDoUsuario(uid);
-      const cnts = DB.contasDoUsuario(uid);
-      const perf = DB.perfilDoUsuario(uid);
-      setTransacoes(txs);
-      setMetas(mts);
-      setContas(cnts);
+      let txs, mts, cnts, perf;
+      if(supabase){
+        const [rTx,rMt,rCn,rPf]=await Promise.all([
+          supabase.from("transacoes").select("*").eq("user_id",uid),
+          supabase.from("metas").select("*").eq("user_id",uid),
+          supabase.from("contas").select("*").eq("user_id",uid),
+          supabase.from("perfis").select("*").eq("user_id",uid).maybeSingle(),
+        ]);
+        txs  = (rTx.data||[]).map(t=>({...t,userId:t.user_id,amountCents:t.amount_cents}));
+        mts  = (rMt.data||[]).map(m=>({...m,userId:m.user_id,nomeMeta:m.nome_meta,valorAlvoCents:m.valor_alvo_cents,valorGuardadoCents:m.valor_guardado_cents}));
+        cnts = (rCn.data||[]).map(c=>({...c,userId:c.user_id,valorCents:c.valor_cents,pagaEm:c.paga_em}));
+        perf = rPf.data ? {...rPf.data,userId:rPf.data.user_id,respondidoEm:rPf.data.respondido_em,descricao:rPf.data.descricao} : null;
+        DB.salvarTransacoes([...DB.transacoes().filter(t=>t.userId!==uid),...txs]);
+        DB.salvarMetas([...DB.metas().filter(m=>m.userId!==uid),...mts]);
+        DB.salvarContas([...DB.contas().filter(c=>c.userId!==uid),...cnts]);
+        if(perf){const ps=DB.perfis().filter(p=>p.userId!==uid);ps.push(perf);DB.salvarPerfis(ps);}
+      } else {
+        txs  = DB.txDoUsuario(uid);
+        mts  = DB.metasDoUsuario(uid);
+        cnts = DB.contasDoUsuario(uid);
+        perf = DB.perfilDoUsuario(uid);
+      }
+      setTransacoes(txs); setMetas(mts); setContas(cnts);
       if(perf) setPerfil(perf);
-      // Calcular saldo para notificações
       const rec  = somarCents(txs.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
       const desp = somarCents(txs.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
       setNotificacoes(gerarNotificacoes(txs, mts, cnts, rec-desp));
-    }catch{}
+    }catch(e){console.error("carregarDados:",e);}
   },[]);
 
   useEffect(()=>{
     if(usuario?.id){
       carregarDados(usuario.id);
-      if(!DB.perfilDoUsuario(usuario.id)) setMostrarQ(true);
+      const perf=DB.perfilDoUsuario(usuario.id);
+      if(!perf){
+        // Novo usuário: inicia tour — o questionário virá só ao final do tour
+        if(tourNovoReg){
+          setTourNovoReg(false);
+          setTourEtapa(0);
+          setTourAtivo(true);
+        } else if(!tourAtivo) {
+          // Voltou sem ter feito o perfil (ex: pulou o tour e reabriu)
+          setMostrarQ(true);
+        }
+      } else {
+        // Mostrar questionário a cada 30 dias
+        const ultima=new Date(perf.respondidoEm||0);
+        const diasPassados=Math.floor((Date.now()-ultima.getTime())/86400000);
+        if(diasPassados>=30) setMostrarQ(true);
+      }
     }
-  },[usuario,carregarDados]);
+  },[usuario,carregarDados,tourNovoReg]);
 
   // Popup de notificações urgentes ao abrir o app
   useEffect(()=>{
@@ -600,14 +782,24 @@ export default function AtlasTrack(){
       if(nome.length<2){setErroAuth("Nome muito curto");return;}
       if(!validarEmail(email)){setErroAuth("E-mail inválido");return;}
       if(senha.length<6){setErroAuth("Senha deve ter mínimo 6 caracteres");return;}
-      const usuarios=DB.usuarios();
-      if(usuarios.find(u=>u.email===email)){setErroAuth("E-mail já cadastrado");return;}
       const senhaCript=await hashSenha(senha);
-      const novo={id:DB.uid(),nome,email,senha:senhaCript,criadoEm:new Date().toISOString()};
-      usuarios.push(novo); DB.salvarUsuarios(usuarios);
-      popularDemo(novo.id);
-      const t=criarJWT({id:novo.id,nome,email});
+      let novoId=DB.uid();
+      if(supabase){
+        // Verificar email duplicado no Supabase
+        const {data:existe}=await supabase.from("usuarios").select("id").eq("email",email).maybeSingle();
+        if(existe){setErroAuth("E-mail já cadastrado");return;}
+        const {data:criado,error:errCriar}=await supabase.from("usuarios").insert({id:novoId,nome,email,senha:senhaCript}).select().single();
+        if(errCriar){setErroAuth("Erro ao criar conta.");return;}
+        novoId=criado.id;
+      } else {
+        const usuarios=DB.usuarios();
+        if(usuarios.find(u=>u.email===email)){setErroAuth("E-mail já cadastrado");return;}
+        const novo={id:novoId,nome,email,senha:senhaCript,criadoEm:new Date().toISOString()};
+        usuarios.push(novo); DB.salvarUsuarios(usuarios);
+      }
+      const t=criarJWT({id:novoId,nome,email});
       localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
+      setTourNovoReg(true);
     }catch{setErroAuth("Erro ao criar conta.");}finally{setCarregando(false);}
   };
 
@@ -617,8 +809,15 @@ export default function AtlasTrack(){
       const email=san(formAuth.email).toLowerCase(), senha=formAuth.senha;
       if(!email||!senha){setErroAuth("Preencha e-mail e senha");return;}
       if(!validarEmail(email)){setErroAuth("E-mail inválido");return;}
-      const enc=DB.usuarios().find(u=>u.email===email);
-      if(!enc){setErroAuth("Conta não encontrada");return;}
+      let enc;
+      if(supabase){
+        const {data,error}=await supabase.from("usuarios").select("*").eq("email",email).maybeSingle();
+        if(error||!data){setErroAuth("Conta não encontrada");return;}
+        enc=data; enc.nome=enc.nome; // já correto
+      } else {
+        enc=DB.usuarios().find(u=>u.email===email);
+        if(!enc){setErroAuth("Conta não encontrada");return;}
+      }
       if(!await verificarSenha(senha,enc.senha)){setErroAuth("Senha incorreta");return;}
       const t=criarJWT({id:enc.id,nome:enc.nome,email:enc.email});
       localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
@@ -634,12 +833,16 @@ export default function AtlasTrack(){
   };
 
   // ── PERFIL ──────────────────────────────────────────────────
-  const responderQ=(pontos)=>{
+  const responderQ=async(pontos)=>{
     const novas=[...respQ,pontos];
     if(etapaQ+1>=PERGUNTAS.length){
       const resultado=calcularPerfil(novas);
+      const agora=new Date().toISOString();
+      if(supabase){
+        await supabase.from("perfis").upsert({user_id:usuario.id,tipo:resultado.tipo,emoji:resultado.emoji,cor:resultado.cor,descricao:resultado.desc,respondido_em:agora},{onConflict:"user_id"});
+      }
       const perfis=DB.perfis().filter(p=>p.userId!==usuario.id);
-      perfis.push({userId:usuario.id,...resultado,respondidoEm:new Date().toISOString()});
+      perfis.push({userId:usuario.id,...resultado,respondidoEm:agora});
       DB.salvarPerfis(perfis); setPerfil(resultado);
       setMostrarQ(false); setEtapaQ(0); setRespQ([]);
       mostrarAviso(`Perfil: ${resultado.emoji} ${resultado.tipo}!`);
@@ -654,16 +857,22 @@ export default function AtlasTrack(){
     const cat=formTx.categoria;
     const desc=san(subcatOverride||formTx.descricao);
     if(cat==="Outros"&&!desc){mostrarAviso("Descrição obrigatória para 'Outros'",false);return;}
+    const novoId=DB.uid();
+    const novaData=formTx.data; const novaCat=cat; const novaDesc=desc; const novaSubcat=san(formTx.subcat||"");
+    if(supabase){
+      await supabase.from("transacoes").insert({id:novoId,user_id:usuario.id,amount_cents:cents,tipo:formTx.tipo,categoria:novaCat,descricao:novaDesc,subcat:novaSubcat,data:novaData});
+    }
     const txs=DB.transacoes();
-    txs.push({id:DB.uid(),userId:usuario.id,amountCents:cents,tipo:formTx.tipo,categoria:cat,descricao:desc,subcat:san(formTx.subcat||""),data:formTx.data,criadoEm:new Date().toISOString()});
+    txs.push({id:novoId,userId:usuario.id,amountCents:cents,tipo:formTx.tipo,categoria:novaCat,descricao:novaDesc,subcat:novaSubcat,data:novaData,criadoEm:new Date().toISOString()});
     DB.salvarTransacoes(txs); carregarDados(usuario.id);
     setInputValor(""); setFormTx({tipo:"despesa",categoria:"Alimentação",descricao:"",data:new Date().toISOString().slice(0,10),subcat:""});
     mostrarAviso("Transação adicionada! ✓"); setAba("painel");
   };
 
-  const excluirTx=(id)=>{
+  const excluirTx=async(id)=>{
     const tx=DB.transacoes().find(t=>t.id===id);
     if(!tx||tx.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    if(supabase) await supabase.from("transacoes").delete().eq("id",id).eq("user_id",usuario.id);
     DB.salvarTransacoes(DB.transacoes().filter(t=>t.id!==id)); carregarDados(usuario.id);
     mostrarAviso("Transação removida");
   };
@@ -676,10 +885,13 @@ export default function AtlasTrack(){
     const guardadoCents=toCents(inputGuardado)||0;
     const ms=DB.metas();
     if(editarMeta){
+      if(supabase) await supabase.from("metas").update({nome_meta:nome,valor_alvo_cents:alvoCents,valor_guardado_cents:guardadoCents,prazo:formMeta.prazo||null}).eq("id",editarMeta.id).eq("user_id",usuario.id);
       const idx=ms.findIndex(m=>m.id===editarMeta.id&&m.userId===usuario.id);
       if(idx>=0) ms[idx]={...ms[idx],nomeMeta:nome,valorAlvoCents:alvoCents,valorGuardadoCents:guardadoCents,prazo:formMeta.prazo};
     }else{
-      ms.push({id:DB.uid(),userId:usuario.id,nomeMeta:nome,valorAlvoCents:alvoCents,valorGuardadoCents:guardadoCents,prazo:formMeta.prazo,criadoEm:new Date().toISOString()});
+      const novoId=DB.uid();
+      if(supabase) await supabase.from("metas").insert({id:novoId,user_id:usuario.id,nome_meta:nome,valor_alvo_cents:alvoCents,valor_guardado_cents:guardadoCents,prazo:formMeta.prazo||null});
+      ms.push({id:novoId,userId:usuario.id,nomeMeta:nome,valorAlvoCents:alvoCents,valorGuardadoCents:guardadoCents,prazo:formMeta.prazo,criadoEm:new Date().toISOString()});
     }
     DB.salvarMetas(ms); carregarDados(usuario.id);
     const era=!!editarMeta;
@@ -687,9 +899,10 @@ export default function AtlasTrack(){
     mostrarAviso(era?"Meta atualizada! ✓":"Meta criada! ✓"); setAba("metas");
   };
 
-  const excluirMeta=(id)=>{
+  const excluirMeta=async(id)=>{
     const m=DB.metas().find(x=>x.id===id);
     if(!m||m.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    if(supabase) await supabase.from("metas").delete().eq("id",id).eq("user_id",usuario.id);
     DB.salvarMetas(DB.metas().filter(x=>x.id!==id)); carregarDados(usuario.id);
     mostrarAviso("Meta removida");
   };
@@ -703,10 +916,13 @@ export default function AtlasTrack(){
     if(!formConta.vencimento){mostrarAviso("Data de vencimento obrigatória",false);return;}
     const cs=DB.contas();
     if(editarConta){
+      if(supabase) await supabase.from("contas").update({nome,valor_cents:valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria}).eq("id",editarConta.id).eq("user_id",usuario.id);
       const idx=cs.findIndex(c=>c.id===editarConta.id&&c.userId===usuario.id);
       if(idx>=0) cs[idx]={...cs[idx],nome,valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria};
     }else{
-      cs.push({id:DB.uid(),userId:usuario.id,nome,valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria,paga:false,criadoEm:new Date().toISOString()});
+      const novoId=DB.uid();
+      if(supabase) await supabase.from("contas").insert({id:novoId,user_id:usuario.id,nome,valor_cents:valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria,paga:false});
+      cs.push({id:novoId,userId:usuario.id,nome,valorCents,vencimento:formConta.vencimento,recorrente:formConta.recorrente,categoria:formConta.categoria,paga:false,criadoEm:new Date().toISOString()});
     }
     DB.salvarContas(cs); carregarDados(usuario.id);
     const era=!!editarConta;
@@ -716,26 +932,30 @@ export default function AtlasTrack(){
     setAba("contas");
   };
 
-  const marcarContaPaga=(id)=>{
+  const marcarContaPaga=async(id)=>{
     const cs=DB.contas();
     const idx=cs.findIndex(c=>c.id===id&&c.userId===usuario.id);
     if(idx<0) return;
     if(cs[idx].recorrente){
-      // Recorrente: avança vencimento 1 mês e mantém como não paga
       const d=new Date(cs[idx].vencimento+"T00:00:00");
       d.setMonth(d.getMonth()+1);
-      cs[idx]={...cs[idx],vencimento:d.toISOString().slice(0,10)};
+      const novoVenc=d.toISOString().slice(0,10);
+      if(supabase) await supabase.from("contas").update({vencimento:novoVenc}).eq("id",id).eq("user_id",usuario.id);
+      cs[idx]={...cs[idx],vencimento:novoVenc};
       mostrarAviso("Pago! Próximo vencimento atualizado 📅");
     }else{
-      cs[idx]={...cs[idx],paga:true,pagaEm:new Date().toISOString()};
+      const agora=new Date().toISOString();
+      if(supabase) await supabase.from("contas").update({paga:true,paga_em:agora}).eq("id",id).eq("user_id",usuario.id);
+      cs[idx]={...cs[idx],paga:true,pagaEm:agora};
       mostrarAviso("Conta marcada como paga! ✓");
     }
     DB.salvarContas(cs); carregarDados(usuario.id);
   };
 
-  const excluirConta=(id)=>{
+  const excluirConta=async(id)=>{
     const c=DB.contas().find(x=>x.id===id);
     if(!c||c.userId!==usuario.id){mostrarAviso("Não autorizado",false);return;}
+    if(supabase) await supabase.from("contas").delete().eq("id",id).eq("user_id",usuario.id);
     DB.salvarContas(DB.contas().filter(x=>x.id!==id)); carregarDados(usuario.id);
     mostrarAviso("Conta removida");
   };
@@ -996,6 +1216,7 @@ export default function AtlasTrack(){
             )}
           </div>
 
+          {formTx.tipo==="despesa"&&(
           <div>
             <label style={S.rot}>Categoria</label>
             <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
@@ -1007,6 +1228,7 @@ export default function AtlasTrack(){
               ))}
             </div>
           </div>
+          )}
 
           {isBar&&(
             <div style={{...S.card,padding:16,background:"#FF8C4210",border:"1.5px solid #FF8C4230"}}>
@@ -1023,7 +1245,7 @@ export default function AtlasTrack(){
 
           <div>
             <label style={S.rot}>Descrição {isOutros&&<span style={{color:"#ff6666"}}>*obrigatório</span>}</label>
-            <input style={S.inp} placeholder={isOutros?"Descreva este gasto...":"Para que foi esse gasto? (opcional)"} value={formTx.descricao}
+            <input style={S.inp} placeholder={formTx.tipo==="receita"?"Ex: Mesada, salário, presente...":isOutros?"Descreva este gasto...":"Para que foi esse gasto? (opcional)"} value={formTx.descricao}
               onChange={e=>setFormTx({...formTx,descricao:e.target.value})} onFocus={S.fi} onBlur={S.fo}/>
           </div>
           <div>
@@ -1631,13 +1853,211 @@ export default function AtlasTrack(){
 
   const contasUrgentes=notificacoes.filter(n=>n.tipo==="perigo").length;
 
+  // ══════════════════════════════════════════════════════════════
+  //  🎓 TOUR DE APRESENTAÇÃO
+  // ══════════════════════════════════════════════════════════════
+  const TOUR_STEPS=((nome)=>[
+    {
+      icone:"⚡",
+      titulo:"Bem-vindo ao AtlasTrack!",
+      desc:`Olá, ${nome}! Aqui você vai controlar suas finanças de forma simples e inteligente. Vamos fazer um tour rápido pelo app?`,
+      cor:"#00E676",
+      aba:null,
+      dica:null,
+    },
+    {
+      icone:"◉",
+      titulo:"Início — seu painel central",
+      desc:"No Início você vê seu saldo atual, receitas, despesas e as transações mais recentes. É a sua visão geral financeira de relance.",
+      cor:"#45B7D1",
+      aba:"painel",
+      dica:"Fique de olho no card de saldo — ele fica vermelho quando você está no negativo!",
+    },
+    {
+      icone:"⊕",
+      titulo:"Adicionar transação",
+      desc:"Aqui você registra tudo que entra e sai: mesada, compras, lanches, transporte. Mantenha atualizado para ter o controle real do seu dinheiro.",
+      cor:"#00E676",
+      aba:"adicionar",
+      dica:"Dica: registre logo após gastar. Quanto mais completo, mais preciso seu saldo!",
+    },
+    {
+      icone:"⊟",
+      titulo:"Histórico",
+      desc:"Consulte todas as suas transações com filtros por categoria, tipo e data. Ótimo para revisar onde o dinheiro foi parar.",
+      cor:"#FFB347",
+      aba:"historico",
+      dica:"Use os filtros para encontrar gastos específicos rapidamente.",
+    },
+    {
+      icone:"◈",
+      titulo:"Gráficos & Estatísticas",
+      desc:"Visualize seus gastos por categoria e mês. Os gráficos revelam padrões que você talvez não perceba no dia a dia.",
+      cor:"#DDA0DD",
+      aba:"estatisticas",
+      dica:"O gráfico de rosca mostra onde você gasta mais — experimente analisar seus padrões!",
+    },
+    {
+      icone:"◎",
+      titulo:"Metas financeiras",
+      desc:"Defina objetivos: notebook novo, festa, viagem... O app acompanha seu progresso e te avisa quando você está perto de atingir a meta!",
+      cor:"#96CEB4",
+      aba:"metas",
+      dica:"Toda meta precisa de um prazo — isso cria um senso de urgência saudável!",
+    },
+    {
+      icone:"🧾",
+      titulo:"Contas a pagar",
+      desc:"Cadastre contas com data de vencimento e receba alertas antes de vencer. Nunca mais esqueça uma conta!",
+      cor:"#FF6B6B",
+      aba:"contas",
+      dica:"Contas recorrentes (mensais) se renovam automaticamente ao marcar como pagas.",
+    },
+    {
+      icone:"🤖",
+      titulo:"Atlas IA — seu assistente",
+      desc:"Converse com a IA sobre suas finanças: ela analisa seus dados reais e dá conselhos personalizados, dicas de economia e responde suas dúvidas.",
+      cor:"#87CEEB",
+      aba:"atlas-ia",
+      dica:"Pergunte coisas como: \"Como estão meus gastos?\" ou \"Me dê dicas para economizar.\"",
+    },
+    {
+      icone:"🧠",
+      titulo:"Perfil Financeiro",
+      desc:"Logo após o tour você vai responder um questionário rápido. Ele identifica se você é Gastador, Equilibrado ou Econômico — e te ajuda a evoluir!",
+      cor:"#FFD700",
+      aba:null,
+      dica:"O questionário se repete a cada 30 dias para acompanhar sua evolução.",
+    },
+    {
+      icone:"🚀",
+      titulo:"Tudo pronto!",
+      desc:"Você conheceu todas as funcionalidades do AtlasTrack. Agora é hora de começar — registre sua primeira receita ou despesa e tome o controle das suas finanças!",
+      cor:"#00E676",
+      aba:null,
+      dica:null,
+    },
+  ])(primeiroNome(usuario?.nome||""));
+
+  const finalizarTour=()=>{
+    setTourAtivo(false);
+    setTourEtapa(0);
+    setMostrarQ(true); // inicia questionário de perfil após o tour
+  };
+
+  const renderTour=()=>{
+    if(!tourAtivo) return null;
+    const step=TOUR_STEPS[tourEtapa];
+    const total=TOUR_STEPS.length;
+    const isUltimo=tourEtapa===total-1;
+    const isPrimeiro=tourEtapa===0;
+
+    // Troca a aba visível conforme o step (quando não é modal central)
+    if(step.aba && aba!==step.aba) setAba(step.aba);
+
+    return(
+      <>
+        {/* Overlay escurecido */}
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",zIndex:400,backdropFilter:"blur(3px)"}}/>
+
+        {/* Card do tour — posicionado na parte inferior */}
+        <div style={{
+          position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+          width:"100%",maxWidth:430,zIndex:401,
+          background:"#161616",
+          borderRadius:"28px 28px 0 0",
+          padding:"24px 24px 36px",
+          boxShadow:"0 -8px 48px rgba(0,0,0,0.6)",
+          border:`1px solid ${step.cor}33`,
+          borderBottom:"none",
+          animation:"slideUpTour 0.35s cubic-bezier(.34,1.3,.64,1)",
+        }}>
+          {/* Barra de progresso */}
+          <div style={{background:"#1e1e1e",borderRadius:4,height:4,marginBottom:22,overflow:"hidden"}}>
+            <div style={{
+              width:`${((tourEtapa+1)/total)*100}%`,height:"100%",
+              background:`linear-gradient(90deg,${step.cor},${step.cor}aa)`,
+              borderRadius:4,transition:"width 0.5s cubic-bezier(.34,1.3,.64,1)"
+            }}/>
+          </div>
+
+          {/* Ícone + step counter */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+            <div style={{
+              width:52,height:52,borderRadius:16,
+              background:`${step.cor}22`,
+              border:`1.5px solid ${step.cor}44`,
+              display:"flex",alignItems:"center",justifyContent:"center",
+              fontSize:26,
+            }}>{step.icone}</div>
+            <span style={{fontSize:12,color:"#444",fontWeight:700}}>{tourEtapa+1} / {total}</span>
+          </div>
+
+          {/* Título */}
+          <h2 style={{margin:"0 0 10px",fontSize:20,fontWeight:900,color:step.cor,letterSpacing:-0.5,lineHeight:1.25}}>
+            {step.titulo}
+          </h2>
+
+          {/* Descrição */}
+          <p style={{margin:0,fontSize:14,color:"#aaa",lineHeight:1.65}}>
+            {step.desc}
+          </p>
+
+          {/* Dica */}
+          {step.dica&&(
+            <div style={{
+              marginTop:14,background:`${step.cor}12`,
+              borderRadius:12,padding:"10px 14px",
+              borderLeft:`3px solid ${step.cor}66`,
+            }}>
+              <p style={{margin:0,fontSize:12.5,color:step.cor,lineHeight:1.55}}>
+                💡 {step.dica}
+              </p>
+            </div>
+          )}
+
+          {/* Botões de navegação */}
+          <div style={{display:"flex",gap:10,marginTop:22}}>
+            {!isPrimeiro&&(
+              <button
+                onClick={()=>setTourEtapa(e=>e-1)}
+                style={{...S.btnG,flex:1,padding:"13px",fontSize:14}}>
+                ← Voltar
+              </button>
+            )}
+            <button
+              onClick={isUltimo ? finalizarTour : ()=>setTourEtapa(e=>e+1)}
+              style={{...S.btn,flex:2,fontSize:15,padding:"13px",background:step.cor}}>
+              {isUltimo?"Começar agora! 🚀":"Próximo →"}
+            </button>
+          </div>
+
+          {/* Pular tour */}
+          {!isUltimo&&(
+            <button
+              onClick={finalizarTour}
+              style={{display:"block",margin:"14px auto 0",background:"none",border:"none",color:"#333",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+              Pular tour
+            </button>
+          )}
+        </div>
+
+        {/* Keyframe de animação via style tag */}
+        <style>{`@keyframes slideUpTour{from{transform:translateX(-50%) translateY(100%);}to{transform:translateX(-50%) translateY(0);}}`}</style>
+      </>
+    );
+  };
+
   return(
     <div style={S.app}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet"/>
       {aviso&&<div style={S.toast(aviso.ok)}>{aviso.msg}</div>}
 
+      {/* Tour de apresentação */}
+      {renderTour()}
+
       {/* Popup de urgência */}
-      {popupInicial&&renderPopupUrgente()}
+      {popupInicial&&!tourAtivo&&renderPopupUrgente()}
 
       {/* Drawer de notificações */}
       {abaNotif&&renderNotificacoes()}
