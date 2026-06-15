@@ -792,7 +792,7 @@ export default function AtlasTrack(){
         const {data:existe}=await supabase.from("usuarios").select("id").eq("email",email).maybeSingle();
         if(existe){setErroAuth("E-mail já cadastrado");return;}
         const {data:criado,error:errCriar}=await supabase.from("usuarios").insert({id:novoId,nome,email,senha:senhaCript}).select().single();
-        if(errCriar){setErroAuth("Erro ao criar conta.");return;}
+        if(errCriar){console.error("Supabase registrar error:",errCriar);setErroAuth("Erro: "+errCriar.message);return;}
         novoId=criado.id;
       } else {
         const usuarios=DB.usuarios();
@@ -803,7 +803,7 @@ export default function AtlasTrack(){
       const t=criarJWT({id:novoId,nome,email});
       localStorage.setItem("atv3_token",t); setUsuario(lerJWT(t));
       setTourNovoReg(true);
-    }catch{setErroAuth("Erro ao criar conta.");}finally{setCarregando(false);}
+    }catch(e){console.error("registrar catch:",e);setErroAuth("Erro ao criar conta: "+e.message);}finally{setCarregando(false);}
   };
 
   const entrar=async()=>{
