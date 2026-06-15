@@ -850,7 +850,7 @@ export default function AtlasTrack(){
   };
 
   // ── TRANSAÇÕES ───────────────────────────────────────────────
-  const adicionarTransacao=(valorCentsOverride=null,subcatOverride=null)=>{
+  const adicionarTransacao=async(valorCentsOverride=null,subcatOverride=null)=>{
     // Converter input de reais para centavos com Math.round — elimina flutuação
     const cents=valorCentsOverride!==null ? valorCentsOverride : toCents(inputValor);
     if(!cents||cents<=0){mostrarAviso("Informe um valor válido",false);return;}
@@ -878,7 +878,7 @@ export default function AtlasTrack(){
   };
 
   // ── METAS ───────────────────────────────────────────────────
-  const salvarMeta=()=>{
+  const salvarMeta=async()=>{
     const nome=san(formMeta.nomeMeta);
     const alvoCents=toCents(inputAlvo);
     if(!nome||!alvoCents){mostrarAviso("Nome e valor alvo obrigatórios",false);return;}
@@ -908,7 +908,7 @@ export default function AtlasTrack(){
   };
 
   // ── CONTAS A PAGAR ────────────────────────────────────────────
-  const salvarConta=()=>{
+  const salvarConta=async()=>{
     const nome=san(formConta.nome);
     const valorCents=toCents(formConta.valorStr);
     if(!nome){mostrarAviso("Nome da conta obrigatório",false);return;}
