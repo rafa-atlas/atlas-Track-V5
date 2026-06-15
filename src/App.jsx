@@ -6,9 +6,12 @@ import { createClient } from "@supabase/supabase-js";
 // ════════════════════════════════════════════════════════════════
 const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+console.log("SUPA_URL:", SUPA_URL);
+console.log("SUPA_KEY:", SUPA_KEY ? "presente" : "AUSENTE");
 let supabase = null;
 try {
   if (SUPA_URL && SUPA_KEY) supabase = createClient(SUPA_URL, SUPA_KEY);
+  console.log("supabase:", supabase ? "inicializado" : "NULL");
 } catch(e) { console.warn("Supabase init error:", e); }
 
 
