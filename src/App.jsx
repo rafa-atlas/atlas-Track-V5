@@ -693,6 +693,10 @@ export default function AtlasTrack(){
   const [abaNotif,       setAbaNotif]       =useState(false);  // drawer aberto?
   const [popupInicial,   setPopupInicial]   =useState(false);  // popup ao abrir
 
+  // Menu lateral (hamburguer) e Atlas IA flutuante
+  const [menuLateral,setMenuLateral]=useState(false);
+  const [atlasIAAberto,setAtlasIAAberto]=useState(false);
+
   // Contas a pagar — form
   const [formConta, setFormConta]=useState({nome:"",valorStr:"",vencimento:"",recorrente:false,categoria:"Outros"});
   const [editarConta,setEditarConta]=useState(null);
@@ -1098,9 +1102,15 @@ export default function AtlasTrack(){
   const renderPainel=()=>(
     <div style={S.tela}>
       <div style={S.cab}>
-        <div>
-          <p style={{color:"#555",fontSize:13,margin:0}}>Olá,</p>
-          <h2 style={{margin:"2px 0 0",fontSize:22,fontWeight:800}}>{primeiroNome(usuario.nome)} 👋</h2>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <button onClick={()=>setMenuLateral(true)}
+            style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,cursor:"pointer",color:"#fff",flexShrink:0}}>
+            ☰
+          </button>
+          <div>
+            <p style={{color:"#555",fontSize:13,margin:0}}>Olá,</p>
+            <h2 style={{margin:"2px 0 0",fontSize:22,fontWeight:800}}>{primeiroNome(usuario.nome)} 👋</h2>
+          </div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {/* Sino de notificações */}
@@ -1113,7 +1123,6 @@ export default function AtlasTrack(){
               <div style={S.notifBadge}>{notificacoes.length>9?"9+":notificacoes.length}</div>
             )}
           </div>
-          <button onClick={sair} style={{background:"#1a1a1a",border:"1px solid #222",borderRadius:12,padding:"8px 14px",color:"#555",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Sair</button>
         </div>
       </div>
       <div style={{padding:"0 20px"}}>
@@ -1489,7 +1498,7 @@ export default function AtlasTrack(){
   //  ATLAS IA
   // ══════════════════════════════════════════════════════════════
   const renderAtlasIA=()=>(
-    <div style={{...S.tela,display:"flex",flexDirection:"column",height:"100vh",paddingBottom:0}}>
+    <div style={{...S.tela,display:"flex",flexDirection:"column",height:"100dvh",minHeight:"100vh",paddingBottom:0}}>
       <div style={S.cab}>
         <div>
           <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Atlas IA</h2>
@@ -1845,16 +1854,169 @@ export default function AtlasTrack(){
   };
 
   // ══════════════════════════════════════════════════════════════
+  //  ☰ MENU LATERAL (HAMBURGUER)
+  // ══════════════════════════════════════════════════════════════
+  const renderMenuLateral=()=>(
+    <>
+      <div onClick={()=>setMenuLateral(false)}
+        style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:250,backdropFilter:"blur(2px)"}}/>
+      <div style={{
+        position:"fixed",top:0,left:0,width:"78%",maxWidth:320,height:"100dvh",minHeight:"100vh",
+        background:"#0e0e0e",zIndex:251,display:"flex",flexDirection:"column",
+        boxShadow:"8px 0 32px rgba(0,0,0,0.5)",
+        animation:"slideInMenu 0.25s cubic-bezier(.34,1.1,.64,1)",
+      }}>
+        <div style={{padding:"50px 20px 20px",borderBottom:"1px solid #1e1e1e"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:44,height:44,borderRadius:14,background:"#00E676",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>⚡</div>
+            <div>
+              <p style={{margin:0,fontWeight:800,fontSize:15}}>{primeiroNome(usuario?.nome)}</p>
+              <p style={{margin:0,fontSize:11,color:"#555"}}>AtlasTrack</p>
+            </div>
+          </div>
+        </div>
+
+        <div style={{flex:1,padding:"12px 12px",display:"flex",flexDirection:"column",gap:4,overflowY:"auto"}}>
+          {MENU_LATERAL.map(item=>(
+            <button key={item.id} onClick={()=>{setAba(item.id);setMenuLateral(false);}}
+              style={{
+                display:"flex",alignItems:"center",gap:14,padding:"14px 14px",
+                background:aba===item.id?"#00E67615":"transparent",
+                border:"none",borderRadius:14,cursor:"pointer",fontFamily:"inherit",
+                color:aba===item.id?"#00E676":"#ccc",textAlign:"left",width:"100%",
+              }}>
+              <span style={{fontSize:19,width:24,textAlign:"center"}}>{item.icone}</span>
+              <span style={{fontSize:14,fontWeight:600}}>{item.rot}</span>
+            </button>
+          ))}
+
+          <div style={{height:1,background:"#1e1e1e",margin:"10px 4px"}}/>
+
+          <button onClick={()=>{setAbaNotif(true);setMenuLateral(false);}}
+            style={{display:"flex",alignItems:"center",gap:14,padding:"14px 14px",background:"transparent",border:"none",borderRadius:14,cursor:"pointer",fontFamily:"inherit",color:"#ccc",textAlign:"left",width:"100%",position:"relative"}}>
+            <span style={{fontSize:19,width:24,textAlign:"center"}}>🔔</span>
+            <span style={{fontSize:14,fontWeight:600}}>Notificações</span>
+            {notificacoes.length>0&&(
+              <span style={{marginLeft:"auto",background:"#ff4455",borderRadius:20,padding:"2px 8px",fontSize:11,fontWeight:800,color:"#fff"}}>{notificacoes.length>9?"9+":notificacoes.length}</span>
+            )}
+          </button>
+        </div>
+
+        <div style={{padding:16,borderTop:"1px solid #1e1e1e"}}>
+          <button onClick={()=>{sair();setMenuLateral(false);}}
+            style={{width:"100%",background:"#1a1a1a",border:"1px solid #222",borderRadius:12,padding:"12px",color:"#888",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>
+            Sair da conta
+          </button>
+        </div>
+      </div>
+      <style>{`@keyframes slideInMenu{from{transform:translateX(-100%);}to{transform:translateX(0);}}`}</style>
+    </>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  //  🤖 ATLAS IA — POPUP FLUTUANTE
+  // ══════════════════════════════════════════════════════════════
+  const renderAtlasIAPopup=()=>{
+    if(!atlasIAAberto) return null;
+    return(
+      <>
+        <div onClick={()=>setAtlasIAAberto(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:260,backdropFilter:"blur(2px)"}}/>
+        <div style={{
+          position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+          width:"100%",maxWidth:430,height:"82dvh",maxHeight:"82vh",zIndex:261,
+          background:"#121212",borderRadius:"24px 24px 0 0",
+          display:"flex",flexDirection:"column",overflow:"hidden",
+          boxShadow:"0 -8px 40px rgba(0,0,0,0.6)",
+          animation:"slideUpTour 0.3s cubic-bezier(.34,1.2,.64,1)",
+        }}>
+          <div style={{padding:"16px 20px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #1e1e1e",flexShrink:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{width:36,height:36,borderRadius:11,background:"linear-gradient(135deg,#00E676,#00C853)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🤖</div>
+              <div>
+                <p style={{margin:0,fontWeight:800,fontSize:15}}>Atlas IA</p>
+                <div style={{display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{width:6,height:6,borderRadius:"50%",background:fonteIA==="claude"?"#00E676":"#FFB347"}}/>
+                  <p style={{margin:0,fontSize:10,color:"#555"}}>{fonteIA==="claude"?"Conectado":"Offline"}</p>
+                </div>
+              </div>
+            </div>
+            <button onClick={()=>setAtlasIAAberto(false)}
+              style={{background:"#1a1a1a",border:"none",borderRadius:10,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,cursor:"pointer",color:"#fff"}}>✕</button>
+          </div>
+
+          <div ref={chatRef} style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
+            {chatIA.length===0&&(
+              <div style={{textAlign:"center",padding:"20px 0"}}>
+                <div style={{fontSize:38,marginBottom:8}}>💬</div>
+                <p style={{color:"#555",fontSize:13,margin:"0 0 16px"}}>Pergunte sobre suas finanças</p>
+                <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:"center"}}>
+                  {["Qual meu saldo?","Gastos do bar","Dica de economia","Resumo do mês"].map(s=>(
+                    <button key={s} onClick={()=>{
+                      const novaMsgUser={role:"user",texto:s,id:Date.now()};
+                      setChatIA(prev=>[...prev,novaMsgUser]);
+                      setDigIA(true);
+                      chamarClaudeAPI(s,[novaMsgUser],transacoes,perfil).then(({texto,fonte})=>{
+                        setChatIA(prev=>[...prev,{role:"ia",texto,id:Date.now()+1,fonte}]);
+                        setFonteIA(fonte); setDigIA(false);
+                      }).catch(()=>{
+                        const fb=respostaLocal(s,transacoes,perfil);
+                        setChatIA(prev=>[...prev,{role:"ia",texto:fb,id:Date.now()+1,fonte:"local"}]);
+                        setFonteIA("local"); setDigIA(false);
+                      });
+                    }} style={{...S.chip(false),fontSize:12}}>{s}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {chatIA.map(m=>(
+              <div key={m.id} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+                {m.role==="ia"&&<div style={{width:28,height:28,borderRadius:9,background:"#00E67622",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0,marginRight:8,alignSelf:"flex-end"}}>🤖</div>}
+                <div style={{maxWidth:"82%"}}>
+                  <div style={{background:m.role==="user"?"#00E676":"#1e1e1e",borderRadius:m.role==="user"?"18px 18px 4px 18px":"18px 18px 18px 4px",padding:"11px 15px",color:m.role==="user"?"#000":"#e0e0e0"}}>
+                    {m.role==="ia"?<TextoIA texto={m.texto}/>:<span style={{fontSize:14}}>{m.texto}</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+            {digIA&&(
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{width:28,height:28,borderRadius:9,background:"#00E67622",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>🤖</div>
+                <div style={{background:"#1e1e1e",borderRadius:"18px 18px 18px 4px",padding:"11px 15px"}}>
+                  <span style={{color:"#555",fontSize:13}}>Analisando...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{padding:"12px 20px",borderTop:"1px solid #1e1e1e",background:"#121212",flexShrink:0,paddingBottom:"max(12px, env(safe-area-inset-bottom))"}}>
+            <div style={{display:"flex",gap:8}}>
+              <input style={{...S.inp,flex:1,padding:"12px 16px"}} placeholder="Pergunte sobre seus gastos..."
+                value={msgIA} onChange={e=>setMsgIA(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!digIA){e.preventDefault();enviarMsgIA();}}}
+                onFocus={S.fi} onBlur={S.fo}/>
+              <button onClick={enviarMsgIA} disabled={digIA}
+                style={{background:digIA?"#1a1a1a":"#00E676",border:"none",borderRadius:14,padding:"0 16px",color:digIA?"#444":"#000",fontSize:18,cursor:digIA?"not-allowed":"pointer",fontFamily:"inherit",flexShrink:0}}>➤</button>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
   //  NAVEGAÇÃO
   // ══════════════════════════════════════════════════════════════
   const NAV=[
     {id:"painel",       icone:"◉",  rot:"Início"},
     {id:"historico",    icone:"⊟",  rot:"Histórico"},
     {id:"adicionar",    icone:"⊕",  rot:"Adicionar"},
-    {id:"estatisticas", icone:"◈",  rot:"Gráficos"},
     {id:"metas",        icone:"◎",  rot:"Metas"},
     {id:"contas",       icone:"🧾", rot:"Contas"},
-    {id:"atlas-ia",     icone:"🤖", rot:"Atlas IA"},
+  ];
+
+  const MENU_LATERAL=[
+    {id:"estatisticas", icone:"◈",  rot:"Gráficos & Estatísticas"},
   ];
 
   const contasUrgentes=notificacoes.filter(n=>n.tipo==="perigo").length;
@@ -1922,9 +2084,9 @@ export default function AtlasTrack(){
     {
       icone:"🤖",
       titulo:"Atlas IA — seu assistente",
-      desc:"Converse com a IA sobre suas finanças: ela analisa seus dados reais e dá conselhos personalizados, dicas de economia e responde suas dúvidas.",
+      desc:"Converse com a IA sobre suas finanças: ela analisa seus dados reais e dá conselhos personalizados, dicas de economia e responde suas dúvidas. Acesse pelo botão flutuante 🤖 no canto da tela!",
       cor:"#87CEEB",
-      aba:"atlas-ia",
+      aba:"painel",
       dica:"Pergunte coisas como: \"Como estão meus gastos?\" ou \"Me dê dicas para economizar.\"",
     },
     {
@@ -2068,20 +2230,41 @@ export default function AtlasTrack(){
       {/* Drawer de notificações */}
       {abaNotif&&renderNotificacoes()}
 
-      <div style={{overflowY:"auto",height:"100vh"}}>
+      {/* Menu lateral (hamburguer) */}
+      {menuLateral&&renderMenuLateral()}
+
+      {/* Atlas IA — popup flutuante */}
+      {renderAtlasIAPopup()}
+
+      <div style={{overflowY:"auto",height:"100dvh",minHeight:"100vh"}}>
         {aba==="painel"       &&renderPainel()}
         {aba==="adicionar"    &&renderAdicionar()}
         {aba==="historico"    &&renderHistorico()}
         {aba==="estatisticas" &&renderEstatisticas()}
         {(aba==="metas"||aba==="nova-meta")&&renderMetas()}
         {(aba==="contas"||aba==="nova-conta")&&renderContas()}
-        {aba==="atlas-ia"     &&renderAtlasIA()}
       </div>
+
+      {/* Botão flutuante do Atlas IA */}
+      {!atlasIAAberto&&!tourAtivo&&(
+        <button onClick={()=>setAtlasIAAberto(true)}
+          style={{
+            position:"fixed",bottom:86,right:"calc(50% - 195px)",
+            width:56,height:56,borderRadius:"50%",
+            background:"linear-gradient(135deg,#00E676,#00C853)",
+            border:"none",cursor:"pointer",zIndex:90,
+            display:"flex",alignItems:"center",justifyContent:"center",
+            fontSize:26,boxShadow:"0 6px 24px rgba(0,230,118,0.45)",
+          }}>
+          🤖
+        </button>
+      )}
+
       <nav style={S.nav}>
         {NAV.map(n=>(
           <button key={n.id} onClick={()=>setAba(n.id)}
             style={{...S.navB(aba===n.id||(aba==="nova-meta"&&n.id==="metas")||(aba==="nova-conta"&&n.id==="contas")),position:"relative"}}>
-            <span style={{fontSize:n.id==="adicionar"?24:n.id==="atlas-ia"||n.id==="contas"?15:18,lineHeight:1}}>{n.icone}</span>
+            <span style={{fontSize:n.id==="adicionar"?24:n.id==="contas"?15:18,lineHeight:1}}>{n.icone}</span>
             {/* Badge na aba contas */}
             {n.id==="contas"&&contasUrgentes>0&&(
               <div style={{...S.notifBadge,top:2,right:6}}>{contasUrgentes>9?"9+":contasUrgentes}</div>
