@@ -767,8 +767,12 @@ export default function AtlasTrack(){
       const rec  = somarCents(txs.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
       const desp = somarCents(txs.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
       setNotificacoes(gerarNotificacoes(txs, mts, cnts, rec-desp));
+    }catch(e){console.error("carregarDados:",e);}
+  },[]);
 
-      // Carregar conquistas já desbloqueadas
+  // Carrega conquistas UMA VEZ por sessão (não a cada ação) — evita "flash" de 0 conquistas
+  const carregarConquistas=useCallback(async(uid)=>{
+    try{
       if(supabase){
         const {data:conqs}=await supabase.from("conquistas_usuario").select("conquista_id").eq("user_id",uid);
         setConquistas((conqs||[]).map(c=>c.conquista_id));
@@ -779,12 +783,14 @@ export default function AtlasTrack(){
         }catch{ setConquistas([]); }
       }
       setConquistasCarregadas(true);
-    }catch(e){console.error("carregarDados:",e);}
+    }catch(e){console.error("carregarConquistas:",e);}
   },[]);
+
 
   useEffect(()=>{
     if(usuario?.id){
       carregarDados(usuario.id);
+      carregarConquistas(usuario.id);
       const perf=DB.perfilDoUsuario(usuario.id);
       if(!perf){
         // Novo usuário: inicia tour — o questionário virá só ao final do tour
@@ -803,7 +809,7 @@ export default function AtlasTrack(){
         if(diasPassados>=30) setMostrarQ(true);
       }
     }
-  },[usuario,carregarDados,tourNovoReg]);
+  },[usuario,carregarDados,carregarConquistas,tourNovoReg]);
 
   // Popup de notificações urgentes ao abrir o app
   useEffect(()=>{
