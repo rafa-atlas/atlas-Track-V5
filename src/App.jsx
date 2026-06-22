@@ -208,6 +208,24 @@ function gerarNotificacoes(transacoes, metas, contas, saldoCents) {
 }
 
 const COR_NOTIF = { perigo:"#ff4455", alerta:"#FFB347", sucesso:"#00E676", info:"#45B7D1" };
+
+// ════════════════════════════════════════════════════════════════
+//  🏆 CONQUISTAS
+// ════════════════════════════════════════════════════════════════
+const CONQUISTAS=[
+  {id:"primeiro_passo",   icone:"🏆", nome:"Primeiro Passo",        desc:"Registre sua primeira receita e despesa"},
+  {id:"registrador",      icone:"📝", nome:"Registrador Dedicado",  desc:"Registre 30 transações no total"},
+  {id:"mestre_economia",  icone:"🐷", nome:"Mestre da Economia",    desc:"Saldo positivo por 3 meses seguidos"},
+  {id:"investidor",       icone:"📈", nome:"Investidor Iniciante",  desc:"Conclua sua primeira meta"},
+  {id:"cacador_metas",    icone:"🎯", nome:"Caçador de Metas",      desc:"Conclua 3 metas"},
+  {id:"pontual",          icone:"🧾", nome:"Pontual",               desc:"Pague 5 contas antes do vencimento"},
+  {id:"organizado",       icone:"🗂️", nome:"Organizado",            desc:"Registre 20 transações categorizadas"},
+  {id:"disciplinado",     icone:"💪", nome:"Disciplinado",          desc:"30 dias seguidos sem saldo negativo"},
+  {id:"redutor_gastos",   icone:"📉", nome:"Redutor de Gastos",     desc:"Reduza gastos por 2 meses seguidos"},
+  {id:"centena_guardada", icone:"💯", nome:"Centena Guardada",      desc:"Guarde R$100+ em alguma meta"},
+  {id:"milionario",       icone:"💎", nome:"Milionário Escolar",    desc:"Saldo acumulado passa de R$1.000"},
+  {id:"explorador",       icone:"🔍", nome:"Explorador",            desc:"Use todas as abas do app"},
+];
 const BG_NOTIF  = { perigo:"#ff445518", alerta:"#FFB34718", sucesso:"#00E67618", info:"#45B7D118" };
 
 
@@ -697,6 +715,10 @@ export default function AtlasTrack(){
   const [menuLateral,setMenuLateral]=useState(false);
   const [atlasIAAberto,setAtlasIAAberto]=useState(false);
 
+  // Conquistas
+  const [conquistas,setConquistas]=useState([]); // ids desbloqueados
+  const [abasVisitadas,setAbasVisitadas]=useState(()=>{try{return JSON.parse(localStorage.getItem("atv3_abasVisitadas")||"[]");}catch{return[];}});
+
   // Contas a pagar — form
   const [formConta, setFormConta]=useState({nome:"",valorStr:"",vencimento:"",recorrente:false,categoria:"Outros"});
   const [editarConta,setEditarConta]=useState(null);
@@ -744,6 +766,17 @@ export default function AtlasTrack(){
       const rec  = somarCents(txs.filter(t=>t.tipo==="receita").map(t=>t.amountCents||toCents(t.amount)));
       const desp = somarCents(txs.filter(t=>t.tipo==="despesa").map(t=>t.amountCents||toCents(t.amount)));
       setNotificacoes(gerarNotificacoes(txs, mts, cnts, rec-desp));
+
+      // Carregar conquistas já desbloqueadas
+      if(supabase){
+        const {data:conqs}=await supabase.from("conquistas_usuario").select("conquista_id").eq("user_id",uid);
+        setConquistas((conqs||[]).map(c=>c.conquista_id));
+      } else {
+        try{
+          const all=JSON.parse(localStorage.getItem("atv3_conquistas")||"{}");
+          setConquistas(all[uid]||[]);
+        }catch{ setConquistas([]); }
+      }
     }catch(e){console.error("carregarDados:",e);}
   },[]);
 
@@ -782,6 +815,103 @@ export default function AtlasTrack(){
   useEffect(()=>{
     if(chatRef.current) chatRef.current.scrollTop=chatRef.current.scrollHeight;
   },[chatIA,digIA]);
+
+  // Rastreia abas visitadas (para conquista "Explorador")
+  useEffect(()=>{
+    if(!usuario?.id) return;
+    const abasBase=["painel","historico","adicionar","metas","contas","estatisticas"];
+    if(abasBase.includes(aba) && !abasVisitadas.includes(aba)){
+      const novas=[...abasVisitadas,aba];
+      setAbasVisitadas(novas);
+      try{localStorage.setItem("atv3_abasVisitadas",JSON.stringify(novas));}catch{}
+    }
+  },[aba,usuario,abasVisitadas]);
+
+  // ── CONQUISTAS: verificação automática ──────────────────────
+  const desbloquearConquista=useCallback(async(id)=>{
+    if(conquistas.includes(id)) return;
+    const item=CONQUISTAS.find(c=>c.id===id);
+    if(!item) return;
+    setConquistas(prev=>[...prev,id]);
+    if(supabase){
+      await supabase.from("conquistas_usuario").upsert({user_id:usuario.id,conquista_id:id},{onConflict:"user_id,conquista_id"});
+    } else {
+      try{
+        const all=JSON.parse(localStorage.getItem("atv3_conquistas")||"{}");
+        all[usuario.id]=[...(all[usuario.id]||[]),id];
+        localStorage.setItem("atv3_conquistas",JSON.stringify(all));
+      }catch{}
+    }
+    mostrarAviso(`🏆 Conquista desbloqueada: ${item.nome}!`);
+  },[conquistas,usuario]);
+
+  useEffect(()=>{
+    if(!usuario?.id || transacoes.length===0 && metas.length===0 && contas.length===0) return;
+    const getCents2=(tx)=>tx.amountCents||toCents(tx.amount);
+    const receitas=transacoes.filter(t=>t.tipo==="receita");
+    const despesas=transacoes.filter(t=>t.tipo==="despesa");
+
+    // Primeiro Passo
+    if(receitas.length>0 && despesas.length>0) desbloquearConquista("primeiro_passo");
+
+    // Registrador Dedicado — 30 transações
+    if(transacoes.length>=30) desbloquearConquista("registrador");
+
+    // Organizado — 20 transações categorizadas (categoria != "Outros" ou tem descrição)
+    const categorizadas=transacoes.filter(t=>t.categoria&&t.categoria!=="Outros");
+    if(categorizadas.length>=20) desbloquearConquista("organizado");
+
+    // Investidor Iniciante — 1ª meta concluída
+    const metasConcluidas=metas.filter(m=>{
+      const alvo=m.valorAlvoCents||toCents(m.valorAlvo);
+      const guard=m.valorGuardadoCents||toCents(m.valorGuardado);
+      return alvo>0 && guard>=alvo;
+    });
+    if(metasConcluidas.length>=1) desbloquearConquista("investidor");
+    if(metasConcluidas.length>=3) desbloquearConquista("cacador_metas");
+
+    // Centena Guardada — alguma meta com 100+ guardado
+    const algumaMeta100=metas.some(m=>(m.valorGuardadoCents||toCents(m.valorGuardado))>=10000);
+    if(algumaMeta100) desbloquearConquista("centena_guardada");
+
+    // Pontual — 5 contas pagas (não recorrentes, paga=true)
+    const contasPagas=contas.filter(c=>c.paga);
+    if(contasPagas.length>=5) desbloquearConquista("pontual");
+
+    // Milionário Escolar — saldo acumulado total > R$1000
+    const totalRec=somarCents(receitas.map(getCents2));
+    const totalDesp=somarCents(despesas.map(getCents2));
+    if((totalRec-totalDesp)>=100000) desbloquearConquista("milionario");
+
+    // Explorador — visitou todas as 6 abas base
+    if(abasVisitadas.length>=6) desbloquearConquista("explorador");
+
+    // Disciplinado — 30 dias seguidos sem saldo negativo (aproximação: saldo atual positivo e conta criada há 30+ dias)
+    if(usuario?.iat){
+      const diasDesdeCriacao=Math.floor((Date.now()-usuario.iat)/86400000);
+      if(diasDesdeCriacao>=30 && (totalRec-totalDesp)>=0) desbloquearConquista("disciplinado");
+    }
+
+    // Mestre da Economia e Redutor de Gastos — requerem histórico mensal
+    const hoje=new Date();
+    const mesesAnalise=[0,1,2].map(i=>{
+      const d=new Date(hoje.getFullYear(),hoje.getMonth()-i,1);
+      return {mes:d.getMonth(),ano:d.getFullYear()};
+    });
+    const saldoDoMes=(mes,ano)=>{
+      const r=somarCents(receitas.filter(t=>{try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mes&&d.getFullYear()===ano;}catch{return false;}}).map(getCents2));
+      const d2=somarCents(despesas.filter(t=>{try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mes&&d.getFullYear()===ano;}catch{return false;}}).map(getCents2));
+      return r-d2;
+    };
+    const saldosUltimos3=mesesAnalise.map(m=>saldoDoMes(m.mes,m.ano));
+    if(saldosUltimos3.every(s=>s>=0)) desbloquearConquista("mestre_economia");
+
+    const gastoDoMes=(mes,ano)=>somarCents(despesas.filter(t=>{try{const d=new Date(t.data+"T00:00:00");return d.getMonth()===mes&&d.getFullYear()===ano;}catch{return false;}}).map(getCents2));
+    const gastosUltimos3=mesesAnalise.map(m=>gastoDoMes(m.mes,m.ano));
+    if(gastosUltimos3[0]<gastosUltimos3[1] && gastosUltimos3[1]<gastosUltimos3[2]) desbloquearConquista("redutor_gastos");
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[transacoes,metas,contas,abasVisitadas]);
 
   // ── AUTH ────────────────────────────────────────────────────
   const registrar=async()=>{
@@ -1854,6 +1984,48 @@ export default function AtlasTrack(){
   };
 
   // ══════════════════════════════════════════════════════════════
+  //  🏆 TELA DE CONQUISTAS
+  // ══════════════════════════════════════════════════════════════
+  const renderConquistas=()=>{
+    const total=CONQUISTAS.length;
+    const desbloqueadas=conquistas.length;
+    const pct=total>0?desbloqueadas/total:0;
+    return(
+      <div style={S.tela}>
+        <div style={S.cab}>
+          <h2 style={{margin:0,fontSize:22,fontWeight:800}}>Conquistas</h2>
+          <Anel pct={pct} tam={52} cor="#FFD700"/>
+        </div>
+        <div style={{padding:"0 20px"}}>
+          <div style={{...S.card,textAlign:"center",background:"linear-gradient(135deg,#FFD70015,#FFB34708)",border:"1.5px solid #FFD70033"}}>
+            <p style={{margin:0,fontSize:32,fontWeight:900,color:"#FFD700"}}>{desbloqueadas}<span style={{fontSize:16,color:"#666"}}>/{total}</span></p>
+            <p style={{margin:"4px 0 0",fontSize:12,color:"#888"}}>conquistas desbloqueadas</p>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:16}}>
+            {CONQUISTAS.map(c=>{
+              const ok=conquistas.includes(c.id);
+              return(
+                <div key={c.id} style={{
+                  background:ok?"#1a1a1a":"#161616",
+                  border:`1.5px solid ${ok?"#FFD70044":"#222"}`,
+                  borderRadius:18,padding:"18px 14px",textAlign:"center",
+                  opacity:ok?1:0.5,position:"relative",
+                }}>
+                  {!ok&&<div style={{position:"absolute",top:10,right:10,fontSize:13}}>🔒</div>}
+                  <div style={{fontSize:34,marginBottom:8,filter:ok?"none":"grayscale(1)"}}>{c.icone}</div>
+                  <p style={{margin:0,fontWeight:800,fontSize:13,color:ok?"#FFD700":"#666"}}>{c.nome}</p>
+                  <p style={{margin:"4px 0 0",fontSize:11,color:"#666",lineHeight:1.4}}>{c.desc}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ══════════════════════════════════════════════════════════════
   //  ☰ MENU LATERAL (HAMBURGUER)
   // ══════════════════════════════════════════════════════════════
   const renderMenuLateral=()=>(
@@ -2017,6 +2189,7 @@ export default function AtlasTrack(){
 
   const MENU_LATERAL=[
     {id:"estatisticas", icone:"◈",  rot:"Gráficos & Estatísticas"},
+    {id:"conquistas",   icone:"🏆", rot:"Conquistas"},
   ];
 
   const contasUrgentes=notificacoes.filter(n=>n.tipo==="perigo").length;
@@ -2241,6 +2414,7 @@ export default function AtlasTrack(){
         {aba==="adicionar"    &&renderAdicionar()}
         {aba==="historico"    &&renderHistorico()}
         {aba==="estatisticas" &&renderEstatisticas()}
+        {aba==="conquistas"   &&renderConquistas()}
         {(aba==="metas"||aba==="nova-meta")&&renderMetas()}
         {(aba==="contas"||aba==="nova-conta")&&renderContas()}
       </div>
