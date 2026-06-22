@@ -717,6 +717,7 @@ export default function AtlasTrack(){
 
   // Conquistas
   const [conquistas,setConquistas]=useState([]); // ids desbloqueados
+  const [conquistasCarregadas,setConquistasCarregadas]=useState(false); // evita checar antes de carregar do banco
   const [abasVisitadas,setAbasVisitadas]=useState(()=>{try{return JSON.parse(localStorage.getItem("atv3_abasVisitadas")||"[]");}catch{return[];}});
 
   // Contas a pagar — form
@@ -777,6 +778,7 @@ export default function AtlasTrack(){
           setConquistas(all[uid]||[]);
         }catch{ setConquistas([]); }
       }
+      setConquistasCarregadas(true);
     }catch(e){console.error("carregarDados:",e);}
   },[]);
 
@@ -846,7 +848,7 @@ export default function AtlasTrack(){
   },[conquistas,usuario]);
 
   useEffect(()=>{
-    if(!usuario?.id || transacoes.length===0 && metas.length===0 && contas.length===0) return;
+    if(!usuario?.id || !conquistasCarregadas || transacoes.length===0 && metas.length===0 && contas.length===0) return;
     const getCents2=(tx)=>tx.amountCents||toCents(tx.amount);
     const receitas=transacoes.filter(t=>t.tipo==="receita");
     const despesas=transacoes.filter(t=>t.tipo==="despesa");
@@ -911,7 +913,7 @@ export default function AtlasTrack(){
     if(gastosUltimos3[0]<gastosUltimos3[1] && gastosUltimos3[1]<gastosUltimos3[2]) desbloquearConquista("redutor_gastos");
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[transacoes,metas,contas,abasVisitadas]);
+  },[transacoes,metas,contas,abasVisitadas,conquistasCarregadas]);
 
   // ── AUTH ────────────────────────────────────────────────────
   const registrar=async()=>{
@@ -970,6 +972,7 @@ export default function AtlasTrack(){
     setNotificacoes([]); setAbaNotif(false); setPopupInicial(false);
     setFormAuth({nome:"",email:"",senha:""}); setTelAuth("login"); setAba("painel");
     setChatIA([]); setMostrarQ(false); setEtapaQ(0); setRespQ([]);
+    setConquistas([]); setConquistasCarregadas(false);
   };
 
   // ── PERFIL ──────────────────────────────────────────────────
